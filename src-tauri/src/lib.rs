@@ -20,6 +20,7 @@ pub mod stt;
 pub mod stt_finalize;
 pub mod tray;
 pub mod voice_intent;
+mod window_state;
 
 pub use hotkey::{default_ask_shortcut, default_shortcut, parse_hotkey};
 pub use tray::{refresh_tray, TrayHandle};
@@ -27,7 +28,6 @@ pub use tray::{refresh_tray, TrayHandle};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::MacosLauncher;
-use tauri_plugin_store::StoreExt;
 use tracing_subscriber::EnvFilter;
 
 use std::sync::{Arc, Mutex};
@@ -519,15 +519,6 @@ mod tests {
             &["speech", "transcrib", "dictation", "voice"]
         ));
     }
-}
-
-/// Persisted window position and size.
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-struct WindowState {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
 }
 
 #[tauri::command]
@@ -1124,9 +1115,11 @@ pub fn run() {
 
             // Close-to-tray: intercept window close
             if let Some(main_window) = app.get_webview_window("main") {
+                window_state::restore_and_track(&main_window);
                 let handle = app.handle().clone();
                 main_window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        window_state::save_main_window_state(&handle);
                         let close_to_tray = *handle
                             .state::<CloseToTrayCache>()
                             .0
@@ -1134,28 +1127,7 @@ pub fn run() {
                             .unwrap_or_else(|e| e.into_inner());
                         if close_to_tray {
                             api.prevent_close();
-                            // Save window state before hiding (skip if minimized)
                             if let Some(w) = handle.get_webview_window("main") {
-                                if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
-                                    if pos.x > -1000
-                                        && pos.y > -1000
-                                        && size.width >= 720
-                                        && size.height >= 480
-                                    {
-                                        let ws = WindowState {
-                                            x: pos.x,
-                                            y: pos.y,
-                                            width: size.width,
-                                            height: size.height,
-                                        };
-                                        if let Ok(store) = handle.store("settings.json") {
-                                            if let Ok(val) = serde_json::to_value(&ws) {
-                                                store.set("window_state", val);
-                                                let _ = store.save();
-                                            }
-                                        }
-                                    }
-                                }
                                 let _ = w.hide();
                             }
                             refresh_tray(&handle);
@@ -1166,25 +1138,6 @@ pub fn run() {
 
             if let Some(ask_window) = app.get_webview_window("ask") {
                 attach_ask_window_close_handler(app.handle(), &ask_window);
-            }
-
-            // Restore window state from previous session
-            if let Ok(store) = app.handle().store("settings.json") {
-                if let Some(val) = store.get("window_state") {
-                    if let Ok(ws) = serde_json::from_value::<WindowState>(val.clone()) {
-                        // Validate: skip if coordinates are off-screen (e.g. -32000 from minimized state)
-                        if ws.x > -1000 && ws.y > -1000 && ws.width >= 720 && ws.height >= 480 {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.set_position(tauri::Position::Physical(
-                                    tauri::PhysicalPosition::new(ws.x, ws.y),
-                                ));
-                                let _ = window.set_size(tauri::Size::Physical(
-                                    tauri::PhysicalSize::new(ws.width, ws.height),
-                                ));
-                            }
-                        }
-                    }
-                }
             }
 
             // Start minimized: only show window if not configured to start minimized
@@ -1285,6 +1238,9 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
+            if matches!(_event, tauri::RunEvent::ExitRequested { .. }) {
+                window_state::save_main_window_state(_app);
+            }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen {
                 has_visible_windows,
