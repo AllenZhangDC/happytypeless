@@ -1519,16 +1519,16 @@ pub async fn stop_ask_dictation(
         ))
       } => result,
     };
-    let result = if cancellation.is_cancelled() {
+    if !state.finish_processing(session.recording_session_id) {
+        return Err(ASK_CANCELLED.to_string());
+    }
+    emit_capsule_state(&app, PipelineState::Idle);
+
+    if cancellation.is_cancelled() {
         Err(ASK_CANCELLED.to_string())
     } else {
         result
-    };
-    if state.finish_processing(session.recording_session_id) {
-        emit_capsule_state(&app, PipelineState::Idle);
     }
-
-    result
 }
 
 #[tauri::command]
