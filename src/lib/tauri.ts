@@ -115,7 +115,31 @@ export async function getConfig(): Promise<AppConfig> {
 }
 
 export async function updateConfig(config: AppConfig): Promise<void> {
-  return invoke('update_config', { config })
+  // Normal settings saves must never replay onboarding credentials.
+  return invoke('update_config', { config: configWithoutProviderSecrets(config) })
+}
+
+export function configWithoutProviderSecrets(config: AppConfig): AppConfig {
+  return { ...config, stt_api_key: '', stt_custom_api_key: '', llm_api_key: '' }
+}
+
+export async function saveOnboardingConfig(config: AppConfig): Promise<AppConfig> {
+  if (config.stt_provider === 'custom-whisper' && config.stt_custom_api_key?.trim()) {
+    await setCredential('stt', 'custom-whisper', config.stt_custom_api_key)
+  } else if (
+    config.stt_api_key?.trim() &&
+    config.stt_provider !== 'cloud' &&
+    config.stt_provider !== 'custom-whisper' &&
+    config.stt_provider !== 'apple-speech'
+  ) {
+    await setCredential('stt', config.stt_provider, config.stt_api_key)
+  }
+  if (config.llm_api_key?.trim() && config.llm_provider !== 'cloud') {
+    await setCredential('llm', config.llm_provider, config.llm_api_key)
+  }
+  const sanitized = configWithoutProviderSecrets(config)
+  await updateConfig(sanitized)
+  return sanitized
 }
 
 export type RecordingLimitMode = 'auto' | 'custom'

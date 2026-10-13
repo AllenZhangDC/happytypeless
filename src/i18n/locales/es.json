@@ -826,7 +826,8 @@
     "saving": "Guardando...",
     "cancel": "Cancelar",
     "reset": "Restablecer",
-    "connectionFail": "Error de conexión"
+    "connectionFail": "Error de conexión",
+    "saveFailed": "No se pudo guardar la configuración. Inténtalo de nuevo."
   },
   "recordingLimits": {
     "auto": "Automático (recomendado, hasta {{duration}})",

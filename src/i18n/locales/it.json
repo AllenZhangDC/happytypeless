@@ -826,7 +826,8 @@
     "saving": "Salvataggio in corso...",
     "cancel": "Annulla",
     "reset": "Reimposta",
-    "connectionFail": "Connessione non riuscita"
+    "connectionFail": "Connessione non riuscita",
+    "saveFailed": "Impossibile salvare le impostazioni. Riprova."
   },
   "recordingLimits": {
     "auto": "Automatica (consigliata, fino a {{duration}})",

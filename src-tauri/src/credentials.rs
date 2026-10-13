@@ -35,6 +35,7 @@ pub struct CredentialRef {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CredentialMigrationReport {
     pub migrated: Vec<CredentialRef>,
+    pub legacy_fields_cleared: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,7 +233,16 @@ pub fn migrate_legacy_config_secrets<V: CredentialVault + CredentialSecretReader
         ));
     }
 
+    let mut migrated = Vec::new();
     for (namespace, provider, secret) in &pending {
+        // Migration imports missing entries only. Explicit key changes use
+        // set_credential, so an old settings snapshot cannot replace a newer key.
+        if vault
+            .get_secret(namespace, provider)?
+            .is_some_and(|stored| !stored.trim().is_empty())
+        {
+            continue;
+        }
         vault.set_secret(namespace, provider, secret)?;
         let verified = vault.get_secret(namespace, provider)?;
         if verified.as_deref() != Some(secret.as_str()) {
@@ -240,6 +250,10 @@ pub fn migrate_legacy_config_secrets<V: CredentialVault + CredentialSecretReader
                 "credential vault verification failed for {namespace}.{provider}"
             ));
         }
+        migrated.push(CredentialRef {
+            namespace: namespace.clone(),
+            provider: provider.clone(),
+        });
     }
 
     if pending
@@ -259,13 +273,8 @@ pub fn migrate_legacy_config_secrets<V: CredentialVault + CredentialSecretReader
     }
 
     Ok(CredentialMigrationReport {
-        migrated: pending
-            .into_iter()
-            .map(|(namespace, provider, _)| CredentialRef {
-                namespace,
-                provider,
-            })
-            .collect(),
+        migrated,
+        legacy_fields_cleared: !pending.is_empty(),
     })
 }
 
@@ -421,6 +430,51 @@ mod tests {
     }
 
     #[test]
+    fn stale_onboarding_keys_cannot_overwrite_rotated_vault_keys() {
+        let stale = AppConfig {
+            stt_provider: "groq-whisper".to_string(),
+            stt_api_key: "old-stt".to_string(),
+            stt_custom_api_key: "old-custom".to_string(),
+            llm_provider: "gemini".to_string(),
+            llm_api_key: "old-llm".to_string(),
+            ..AppConfig::default()
+        };
+        let vault = MemoryVault::default();
+        migrate_legacy_config_secrets(&mut stale.clone(), &vault).unwrap();
+        vault.set_secret("stt", "groq-whisper", "new-stt").unwrap();
+        vault
+            .set_secret("stt", "custom-whisper", "new-custom")
+            .unwrap();
+        vault.set_secret("llm", "gemini", "new-llm").unwrap();
+        let writes_before_save = vault.records().len();
+        for _ in 0..2 {
+            let mut settings = stale.clone();
+            let report = migrate_legacy_config_secrets(&mut settings, &vault).unwrap();
+            assert!(report.migrated.is_empty());
+            assert!(report.legacy_fields_cleared);
+            assert!(settings.stt_api_key.is_empty());
+            assert!(settings.stt_custom_api_key.is_empty());
+            assert!(settings.llm_api_key.is_empty());
+            assert_eq!(
+                resolve_stt_config_secret(&settings, &vault).unwrap(),
+                "new-stt"
+            );
+            assert_eq!(
+                resolve_llm_config_secret(&settings, &vault).unwrap(),
+                "new-llm"
+            );
+            assert_eq!(
+                vault
+                    .get_secret("stt", "custom-whisper")
+                    .unwrap()
+                    .as_deref(),
+                Some("new-custom")
+            );
+        }
+        assert_eq!(vault.records().len(), writes_before_save);
+    }
+
+    #[test]
     fn keeps_plaintext_api_keys_when_any_vault_write_fails() {
         let mut config = AppConfig {
             stt_provider: "deepgram".to_string(),
@@ -442,7 +496,8 @@ mod tests {
 
     #[test]
     fn keeps_plaintext_api_keys_when_vault_verification_fails() {
-        struct MismatchedReadVault;
+        #[derive(Default)]
+        struct MismatchedReadVault(std::sync::atomic::AtomicBool);
 
         impl CredentialVault for MismatchedReadVault {
             fn set_secret(&self, _namespace: &str, _provider: &str, _secret: &str) -> Result<()> {
@@ -452,7 +507,11 @@ mod tests {
 
         impl CredentialSecretReader for MismatchedReadVault {
             fn get_secret(&self, _namespace: &str, _provider: &str) -> Result<Option<String>> {
-                Ok(Some("wrong-secret".to_string()))
+                if self.0.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    Ok(Some("wrong-secret".to_string()))
+                } else {
+                    Ok(None)
+                }
             }
         }
 
@@ -462,7 +521,7 @@ mod tests {
             ..AppConfig::default()
         };
 
-        let result = migrate_legacy_config_secrets(&mut config, &MismatchedReadVault);
+        let result = migrate_legacy_config_secrets(&mut config, &MismatchedReadVault::default());
 
         assert!(result.is_err());
         assert_eq!(config.stt_api_key, "stt-secret");

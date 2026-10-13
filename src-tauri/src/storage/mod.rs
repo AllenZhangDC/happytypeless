@@ -1192,7 +1192,7 @@ impl ConfigManager {
 
     fn migrate_legacy_config_secrets_on_load(&self, config: &mut AppConfig) {
         match migrate_legacy_config_secrets(config, &SystemCredentialVault) {
-            Ok(report) if !report.migrated.is_empty() => {
+            Ok(report) if report.legacy_fields_cleared => {
                 tracing::info!(
                     migrated_credentials = report.migrated.len(),
                     "Migrated legacy config credentials to system credential vault"

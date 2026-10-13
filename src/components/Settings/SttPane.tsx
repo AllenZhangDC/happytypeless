@@ -94,7 +94,7 @@ export function SttPane() {
     setCredentialErrorMessage(null)
     readCredential('stt', credentialProvider)
       .then((secret) => {
-        if (!cancelled) setApiKeyDraft(legacyApiKey || secret || '')
+        if (!cancelled) setApiKeyDraft(secret ?? legacyApiKey)
       })
       .catch((error) => console.error('[credentials] failed to read STT credential', error))
 

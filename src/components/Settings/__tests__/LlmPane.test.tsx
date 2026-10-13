@@ -278,6 +278,14 @@ describe('LlmPane', () => {
   })
 
   describe('API Key input', () => {
+    it('displays the rotated vault key instead of a stale onboarding key', async () => {
+      mockAppStore.config.llm_api_key = 'old-onboarding-key'
+      vi.mocked(tauri.readCredential).mockResolvedValueOnce('new-vault-key')
+      render(<LlmPane />)
+      await waitFor(() =>
+        expect(screen.getByPlaceholderText('Enter API Key')).toHaveValue('new-vault-key'),
+      )
+    })
     it('renders API key input with current value', () => {
       mockAppStore.config.llm_api_key = 'sk-test123'
       render(<LlmPane />)

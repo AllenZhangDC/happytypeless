@@ -65,6 +65,11 @@ fn emit_config_patch(app: &tauri::AppHandle, patch: &Value) {
 }
 
 fn prepare_config_for_save(mut config: storage::AppConfig) -> Result<storage::AppConfig, String> {
+    // Renderer settings are not a credential update channel. Migration is
+    // reserved for reading old settings; explicit edits use set_credential.
+    config.stt_api_key.clear();
+    config.stt_custom_api_key.clear();
+    config.llm_api_key.clear();
     sync_hotkey_fields_before_save(&mut config);
     crate::hotkey::validate_hotkey_config(&config.hotkeys).map_err(|e| e.to_string())?;
     config.normalize_values();
@@ -603,6 +608,20 @@ mod tests {
         assert_eq!(patch["history_enabled"], false);
         assert_eq!(patch["history_retention_days"], 30);
         assert_eq!(patch["history_max_entries"], 250);
+    }
+
+    #[test]
+    fn ordinary_settings_save_cannot_reintroduce_legacy_secrets() {
+        let config = storage::AppConfig {
+            stt_api_key: "stale-stt".to_string(),
+            stt_custom_api_key: "stale-custom".to_string(),
+            llm_api_key: "stale-llm".to_string(),
+            ..storage::AppConfig::default()
+        };
+        let prepared = prepare_config_for_save(config).unwrap();
+        assert!(prepared.stt_api_key.is_empty());
+        assert!(prepared.stt_custom_api_key.is_empty());
+        assert!(prepared.llm_api_key.is_empty());
     }
 
     #[test]

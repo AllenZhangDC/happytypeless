@@ -826,7 +826,8 @@
     "saving": "저장 중...",
     "cancel": "취소",
     "reset": "재설정",
-    "connectionFail": "연결에 실패했습니다"
+    "connectionFail": "연결에 실패했습니다",
+    "saveFailed": "설정을 저장하지 못했습니다. 다시 시도해 주세요."
   },
   "recordingLimits": {
     "auto": "자동(권장, 최대 {{duration}})",

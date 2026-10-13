@@ -826,7 +826,8 @@
     "saving": "Salvando...",
     "cancel": "Cancelar",
     "reset": "Redefinir",
-    "connectionFail": "Conexão falhou"
+    "connectionFail": "Conexão falhou",
+    "saveFailed": "Não foi possível salvar as configurações. Tente novamente."
   },
   "recordingLimits": {
     "auto": "Automático (recomendado, até {{duration}})",

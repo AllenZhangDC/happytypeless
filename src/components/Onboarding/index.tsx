@@ -1,8 +1,9 @@
 import { AnimatePresence, motion } from 'framer-motion'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../../stores/appStore'
 import { useAuthStore } from '../../stores/authStore'
-import { saveOnboardingCompleted, updateConfig as saveConfig } from '../../lib/tauri'
+import { saveOnboardingCompleted, saveOnboardingConfig } from '../../lib/tauri'
 import { OnboardingLayout } from './OnboardingLayout'
 import { WelcomeStep } from './WelcomeStep'
 import { AccountStep } from './AccountStep'
@@ -18,6 +19,7 @@ const TOTAL_STEPS = 8
 
 export function Onboarding() {
   const { t } = useTranslation()
+  const [saveFailed, setSaveFailed] = useState(false)
   const step = useAppStore((s) => s.onboardingStep)
   const setStep = useAppStore((s) => s.setOnboardingStep)
   const setOnboardingCompleted = useAppStore((s) => s.setOnboardingCompleted)
@@ -26,6 +28,8 @@ export function Onboarding() {
   const onboardingMode = useAppStore((s) => s.onboardingMode)
   const setOnboardingMode = useAppStore((s) => s.setOnboardingMode)
   const updateConfig = useAppStore((s) => s.updateConfig)
+  const setConfig = useAppStore((s) => s.setConfig)
+  const setSavedConfig = useAppStore((s) => s.setSavedConfig)
   const user = useAuthStore((s) => s.user)
 
   const canNext = (() => {
@@ -67,6 +71,16 @@ export function Onboarding() {
 
   const config = useAppStore((s) => s.config)
 
+  const saveConfig = async (draft = config) => {
+    setSaveFailed(false)
+    try {
+      return await saveOnboardingConfig(draft)
+    } catch (error) {
+      setSaveFailed(true)
+      throw error
+    }
+  }
+
   const handleNext = async () => {
     if (step < TOTAL_STEPS - 1) {
       // Cloud mode: set providers BEFORE saving, then skip STT/LLM setup
@@ -89,9 +103,15 @@ export function Onboarding() {
 
       setStep(step + 1)
     } else {
-      await saveConfig(config)
-      await saveOnboardingCompleted()
-      setOnboardingCompleted(true)
+      try {
+        const saved = await saveConfig(config)
+        await saveOnboardingCompleted()
+        setConfig(saved)
+        setSavedConfig(saved)
+        setOnboardingCompleted(true)
+      } catch {
+        setSaveFailed(true)
+      }
     }
   }
 
@@ -133,10 +153,13 @@ export function Onboarding() {
     }
     // Original behavior for other steps — skip entire onboarding
     try {
-      await saveConfig(config)
+      const saved = await saveConfig(config)
       await saveOnboardingCompleted()
+      setConfig(saved)
+      setSavedConfig(saved)
     } catch {
-      // Best-effort save — still let the user continue into the app.
+      setSaveFailed(true)
+      return
     }
     setOnboardingCompleted(true)
   }
@@ -156,6 +179,11 @@ export function Onboarding() {
       onBack={handleBack}
       onSkip={handleSkip}
     >
+      {saveFailed && (
+        <p role="alert" className="mb-3 text-sm text-error">
+          {t('common.saveFailed')}
+        </p>
+      )}
       <AnimatePresence mode="wait">
         <motion.div
           key={step}

@@ -2,6 +2,7 @@ import React from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Onboarding } from '../index'
+import { saveOnboardingConfig, saveOnboardingCompleted } from '../../../lib/tauri'
 
 const mockStore = {
   onboardingStep: 5,
@@ -12,6 +13,8 @@ const mockStore = {
   onboardingMode: 'cloud',
   setOnboardingMode: vi.fn(),
   updateConfig: vi.fn(),
+  setConfig: vi.fn(),
+  setSavedConfig: vi.fn(),
   config: {},
 }
 
@@ -27,10 +30,21 @@ vi.mock('react-i18next', () => ({
 }))
 
 vi.mock('../OnboardingLayout', () => ({
-  OnboardingLayout: ({ children, onBack }: { children: React.ReactNode; onBack: () => void }) => (
+  OnboardingLayout: ({
+    children,
+    onBack,
+    onNext,
+  }: {
+    children: React.ReactNode
+    onBack: () => void
+    onNext: () => void
+  }) => (
     <div>
       <button type="button" onClick={onBack}>
         Back
+      </button>
+      <button type="button" onClick={onNext}>
+        Next
       </button>
       {children}
     </div>
@@ -56,11 +70,12 @@ vi.mock('../../../stores/authStore', () => ({
 }))
 
 vi.mock('../../../lib/tauri', () => ({
-  updateConfig: vi.fn().mockResolvedValue(undefined),
+  saveOnboardingConfig: vi.fn().mockResolvedValue({}),
   saveOnboardingCompleted: vi.fn().mockResolvedValue(undefined),
 }))
 
 beforeEach(() => {
+  vi.clearAllMocks()
   mockStore.onboardingStep = 5
   mockStore.onboardingMode = 'cloud'
   mockStore.setOnboardingStep.mockReset()
@@ -69,6 +84,28 @@ beforeEach(() => {
 afterEach(() => cleanup())
 
 describe('Onboarding cloud navigation', () => {
+  it('keeps onboarding open and reports a failed credential save', async () => {
+    mockStore.onboardingStep = 7
+    vi.mocked(saveOnboardingConfig).mockRejectedValueOnce(new Error('vault unavailable'))
+    render(<Onboarding />)
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('common.saveFailed'))
+    expect(saveOnboardingCompleted).not.toHaveBeenCalled()
+    expect(mockStore.setOnboardingCompleted).not.toHaveBeenCalled()
+  })
+  it('replaces the onboarding draft with sanitized settings before entering the app', async () => {
+    mockStore.onboardingStep = 7
+    const saved = { ...mockStore.config, stt_api_key: '', stt_custom_api_key: '', llm_api_key: '' }
+    vi.mocked(saveOnboardingConfig).mockResolvedValueOnce(
+      saved as Awaited<ReturnType<typeof saveOnboardingConfig>>,
+    )
+    render(<Onboarding />)
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await waitFor(() => expect(mockStore.setOnboardingCompleted).toHaveBeenCalledWith(true))
+    expect(saveOnboardingCompleted).toHaveBeenCalled()
+    expect(mockStore.setConfig).toHaveBeenCalledWith(saved)
+    expect(mockStore.setSavedConfig).toHaveBeenCalledWith(saved)
+  })
   it('returns from Permissions to Mode Select because cloud skips provider setup', async () => {
     render(<Onboarding />)
 

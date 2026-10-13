@@ -826,7 +826,8 @@
     "saving": "Enregistrement...",
     "cancel": "Annuler",
     "reset": "Réinitialiser",
-    "connectionFail": "Échec de la connexion"
+    "connectionFail": "Échec de la connexion",
+    "saveFailed": "Impossible d’enregistrer les paramètres. Veuillez réessayer."
   },
   "recordingLimits": {
     "auto": "Automatique (recommandé, jusqu’à {{duration}})",

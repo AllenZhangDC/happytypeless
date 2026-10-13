@@ -826,7 +826,8 @@
     "saving": "保存中...",
     "cancel": "キャンセル",
     "reset": "リセット",
-    "connectionFail": "接続に失敗しました"
+    "connectionFail": "接続に失敗しました",
+    "saveFailed": "設定を保存できませんでした。もう一度お試しください。"
   },
   "recordingLimits": {
     "auto": "自動（推奨、最大{{duration}}）",
