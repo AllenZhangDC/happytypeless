@@ -20,6 +20,7 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Notify;
 
 pub const ASK_MAX_QUESTION_CHARS: usize = 500;
+const ASK_CANCELLED: &str = "Ask cancelled";
 pub const ASK_MAX_SELECTED_TEXT_CHARS: usize = 4_000;
 pub const ASK_OUTPUT_TOKEN_LIMIT: u32 = 80;
 const ASK_STT_FINALIZE_TIMEOUT_SECS: u64 = 12;
@@ -43,6 +44,7 @@ struct AskDictationStateInner {
     stop_after_start: bool,
     session: Option<AskDictationSession>,
     processing: bool,
+    processing_session: Option<(u64, crate::stt_finalize::SttCancellation)>,
     pending_message: Option<PendingAskMessage>,
 }
 
@@ -80,8 +82,19 @@ impl AskDictationState {
         guard.stop_after_start = false;
     }
 
+    #[cfg(test)]
     fn set_processing(&self, processing: bool) {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).processing = processing;
+    }
+
+    fn finish_processing(&self, session_id: u64) -> bool {
+        let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.processing_session.as_ref().map(|(id, _)| *id) != Some(session_id) {
+            return false;
+        }
+        guard.processing_session = None;
+        guard.processing = false;
+        true
     }
 
     pub fn set_pending_result(&self, result: AskDictationResult) {
@@ -134,6 +147,10 @@ impl AskDictationState {
         let was_starting = guard.starting;
         guard.starting = false;
         guard.stop_after_start = false;
+        if let Some((_, cancellation)) = guard.processing_session.take() {
+            cancellation.cancel();
+            guard.processing = false;
+        }
         (guard.session.take(), was_starting)
     }
 }
@@ -147,6 +164,14 @@ pub struct AskDictationSession {
     transcript: Arc<Mutex<String>>,
     error: Arc<Mutex<Option<String>>>,
     done: Arc<Notify>,
+    finalize_timeout: std::time::Duration,
+    cancellation: crate::stt_finalize::SttCancellation,
+}
+
+impl Drop for AskDictationSession {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -1121,6 +1146,7 @@ pub(crate) async fn start_reserved_ask_dictation(
         let transcript = Arc::new(Mutex::new(String::new()));
         let error = Arc::new(Mutex::new(None::<String>));
         let done = Arc::new(Notify::new());
+        let cancellation = crate::stt_finalize::SttCancellation::default();
         let task_operation_id = operation_id.clone();
 
         let should_discard_started_resources = {
@@ -1140,6 +1166,11 @@ pub(crate) async fn start_reserved_ask_dictation(
                     transcript: transcript.clone(),
                     error: error.clone(),
                     done: done.clone(),
+                    finalize_timeout: crate::stt_finalize::finalize_timeout(
+                        &config.stt_provider,
+                        std::time::Duration::from_secs(ASK_STT_FINALIZE_TIMEOUT_SECS),
+                    ),
+                    cancellation: cancellation.clone(),
                 });
                 false
             }
@@ -1191,7 +1222,10 @@ pub(crate) async fn start_reserved_ask_dictation(
         }
 
         tauri::async_runtime::spawn(async move {
-            loop {
+            tokio::select! {
+              _ = cancellation.cancelled() => {},
+              _ = async {
+               loop {
                 tokio::select! {
                     chunk = audio_rx.recv() => {
                         match chunk {
@@ -1268,8 +1302,9 @@ pub(crate) async fn start_reserved_ask_dictation(
                     }
                 }
             }
-
-            done.notify_waiters();
+              } => {},
+            }
+            done.notify_one();
         });
 
         tauri::async_runtime::spawn(async move {
@@ -1364,41 +1399,20 @@ pub async fn stop_ask_dictation(
             .ok_or_else(|| "Ask dictation is not recording".to_string())?;
         guard.stop_after_start = false;
         guard.processing = true;
+        guard.processing_session =
+            Some((session.recording_session_id, session.cancellation.clone()));
         session
     };
 
-    let result = async {
+    let cancellation = session.cancellation.clone();
+    let result = tokio::select! {
+      _ = cancellation.cancelled() => Err(ASK_CANCELLED.to_string()),
+      result = async {
         session.handle.stop();
         emit_capsule_state(&app, PipelineState::AskThinking);
 
-        let finalize_timed_out = tokio::select! {
-            _ = session.done.notified() => false,
-            _ = tokio::time::sleep(std::time::Duration::from_secs(ASK_STT_FINALIZE_TIMEOUT_SECS)) => {
-                true
-            }
-        };
-
-        if finalize_timed_out {
-            let transcript = session
-                .transcript
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            if let Some(message) = session
-                .error
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone()
-            {
-                return Err(message);
-            }
-            if transcript.trim().is_empty() {
-                return Err("No speech detected. Please try again.".to_string());
-            }
-            tracing::warn!(
-                "Ask STT finalize timed out; continuing with collected transcript"
-            );
-        }
+        crate::stt_finalize::wait_for_completion(&session.done, session.finalize_timeout)
+            .await.map_err(ask_app_error_message)?;
 
         if let Some(message) = session
             .error
@@ -1503,13 +1517,18 @@ pub async fn stop_ask_dictation(
             voice_intent.kind,
             AskDictationResultMetadata::popup(used_selected_text, selected_text_truncated),
         ))
+      } => result,
+    };
+    if !state.finish_processing(session.recording_session_id) {
+        return Err(ASK_CANCELLED.to_string());
     }
-    .await;
-
-    state.set_processing(false);
     emit_capsule_state(&app, PipelineState::Idle);
 
-    result
+    if cancellation.is_cancelled() {
+        Err(ASK_CANCELLED.to_string())
+    } else {
+        result
+    }
 }
 
 #[tauri::command]
@@ -1527,6 +1546,7 @@ pub async fn stop_ask_flow(
     match stop_ask_dictation(app.clone(), state, config_state, token_store, client).await {
         Ok(result) if result.should_show_window() => show_answer_window(&app, result),
         Ok(_) => Ok(()),
+        Err(message) if message == ASK_CANCELLED => Ok(()),
         Err(message) => show_error_window(&app, message),
     }
 }
@@ -1554,6 +1574,43 @@ pub fn take_pending_ask_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn abort_processing_cancels_the_pending_phase() {
+        let state = AskDictationState::default();
+        let cancellation = crate::stt_finalize::SttCancellation::default();
+        {
+            let mut guard = state.0.lock().unwrap();
+            guard.processing = true;
+            guard.processing_session = Some((7, cancellation.clone()));
+        }
+        state.abort_starting_or_recording();
+        cancellation.cancelled().await;
+        assert!(!state.is_busy());
+    }
+
+    #[test]
+    fn cancelled_finisher_cannot_clear_a_new_session() {
+        let state = AskDictationState::default();
+        let old = crate::stt_finalize::SttCancellation::default();
+        {
+            let mut guard = state.0.lock().unwrap();
+            guard.processing = true;
+            guard.processing_session = Some((7, old.clone()));
+        }
+        state.abort_starting_or_recording();
+        let new = crate::stt_finalize::SttCancellation::default();
+        {
+            let mut guard = state.0.lock().unwrap();
+            guard.processing = true;
+            guard.processing_session = Some((8, new.clone()));
+        }
+        assert!(!state.finish_processing(7));
+        assert!(state.is_busy());
+        assert!(old.is_cancelled());
+        assert!(!new.is_cancelled());
+        assert!(state.finish_processing(8));
+    }
 
     #[test]
     fn ask_body_uses_low_output_cap_and_no_web_search() {

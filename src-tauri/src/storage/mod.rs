@@ -1145,6 +1145,15 @@ pub struct ConfigManager {
     cache: Mutex<Option<AppConfig>>,
 }
 
+pub(crate) fn config_with_native_managed_state(
+    mut incoming: AppConfig,
+    current: Option<&AppConfig>,
+) -> AppConfig {
+    incoming.managed_stt_capability_state =
+        current.and_then(|config| config.managed_stt_capability_state.clone());
+    incoming
+}
+
 impl ConfigManager {
     pub fn new(app_handle: tauri::AppHandle) -> Self {
         Self {
@@ -1190,9 +1199,30 @@ impl ConfigManager {
         Ok(())
     }
 
+    pub async fn save_renderer_config(
+        &self,
+        incoming: AppConfig,
+        prepare: impl FnOnce(AppConfig) -> std::result::Result<AppConfig, String>,
+    ) -> Result<AppConfig> {
+        // Merge at commit time: an auth refresh or logout may have changed the
+        // capability since the renderer read its settings. Keep this lock until
+        // persistence completes so the renderer cannot resurrect an old state.
+        let mut cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
+        let mut current = cache.clone();
+        if let Some(current) = current.as_mut() {
+            // Do not discard the only legacy key copy if the vault is unavailable.
+            migrate_legacy_config_secrets(current, &SystemCredentialVault)?;
+        }
+        let config = prepare(config_with_native_managed_state(incoming, current.as_ref()))
+            .map_err(anyhow::Error::msg)?;
+        self.persist_config(&config)?;
+        *cache = Some(config.clone());
+        Ok(config)
+    }
+
     fn migrate_legacy_config_secrets_on_load(&self, config: &mut AppConfig) {
         match migrate_legacy_config_secrets(config, &SystemCredentialVault) {
-            Ok(report) if !report.migrated.is_empty() => {
+            Ok(report) if report.legacy_fields_cleared => {
                 tracing::info!(
                     migrated_credentials = report.migrated.len(),
                     "Migrated legacy config credentials to system credential vault"

@@ -1952,7 +1952,14 @@ impl PipelineHandle {
         drop(guard);
 
         // ── Phase 1: Wait for STT ──────────────────────────────────────
-        let raw_text = match self.wait_for_stt(stt_control.clone()).await? {
+        let finalize_timeout = crate::stt_finalize::finalize_timeout(
+            &config.stt_provider,
+            std::time::Duration::from_secs(STT_FINALIZE_TIMEOUT_SECS),
+        );
+        let raw_text = match self
+            .wait_for_stt(stt_control.clone(), finalize_timeout)
+            .await?
+        {
             Some(text) => text,
             None => {
                 if let Some(control) = &stt_control {
@@ -2053,16 +2060,29 @@ impl PipelineHandle {
     /// Wait for the STT task to complete and return the transcribed text.
     /// Returns `Ok(Some(text))` on success, `Ok(None)` if aborted or no speech,
     /// or `Err` on failure.
-    async fn wait_for_stt(&self, stt_control: Option<SttTaskControl>) -> Result<Option<String>> {
+    async fn wait_for_stt(
+        &self,
+        stt_control: Option<SttTaskControl>,
+        timeout: std::time::Duration,
+    ) -> Result<Option<String>> {
         if let Some(control) = &stt_control {
-            tokio::select! {
-                _ = control.done.notified() => {
-                    tracing::debug!("STT task completed");
+            if let Err(error) =
+                crate::stt_finalize::wait_for_completion(&control.done, timeout).await
+            {
+                if self
+                    .active_stt_session_id
+                    .compare_exchange(control.id, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    control.abort.notify_one();
+                    let _ = self
+                        .app_handle
+                        .emit("pipeline:error", error.to_user_error());
+                    self.set_state(PipelineState::Idle);
                 }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(STT_FINALIZE_TIMEOUT_SECS)) => {
-                    tracing::warn!("STT timed out after {}s", STT_FINALIZE_TIMEOUT_SECS);
-                }
+                return Ok(None);
             }
+            tracing::debug!("STT task completed");
 
             if !should_finalize_stt_task(
                 self.abort_flag.as_ref(),

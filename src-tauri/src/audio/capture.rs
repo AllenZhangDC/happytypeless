@@ -280,13 +280,13 @@ fn build_input_stream_for_sample<T>(
     device: &cpal::Device,
     stream_config: &cpal::StreamConfig,
     context: InputProcessingContext,
-) -> std::result::Result<cpal::Stream, cpal::BuildStreamError>
+) -> std::result::Result<cpal::Stream, cpal::Error>
 where
     T: cpal::SizedSample,
     f32: cpal::FromSample<T>,
 {
     device.build_input_stream(
-        stream_config,
+        *stream_config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
             let samples = samples_to_f32(data);
             process_input_samples(&samples, &context);

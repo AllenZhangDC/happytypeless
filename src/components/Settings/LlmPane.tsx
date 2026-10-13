@@ -138,7 +138,7 @@ export function LlmPane() {
     setCredentialErrorMessage(null)
     readCredential('llm', config.llm_provider)
       .then((secret) => {
-        if (!cancelled) setLlmApiKey(legacyApiKey || secret || '')
+        if (!cancelled) setLlmApiKey(secret ?? legacyApiKey)
       })
       .catch((error) => console.error('[credentials] failed to read LLM credential', error))
 

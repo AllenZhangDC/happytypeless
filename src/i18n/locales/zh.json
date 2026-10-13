@@ -826,7 +826,8 @@
     "saving": "保存中...",
     "cancel": "取消",
     "reset": "重置",
-    "connectionFail": "连接失败"
+    "connectionFail": "连接失败",
+    "saveFailed": "设置保存失败，请重试。"
   },
   "recordingLimits": {
     "auto": "自动（推荐，最长 {{duration}}）",

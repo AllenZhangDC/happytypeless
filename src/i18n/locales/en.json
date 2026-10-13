@@ -826,7 +826,8 @@
     "saving": "Saving...",
     "cancel": "Cancel",
     "reset": "Reset",
-    "connectionFail": "Connection failed"
+    "connectionFail": "Connection failed",
+    "saveFailed": "Could not save settings. Please try again."
   },
   "recordingLimits": {
     "auto": "Auto (recommended, up to {{duration}})",

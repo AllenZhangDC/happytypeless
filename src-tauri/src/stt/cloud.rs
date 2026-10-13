@@ -415,99 +415,104 @@ impl SttProvider for CloudSttProvider {
             payload.bytes.len()
         );
 
-        let mut attempt = 0u32;
-        loop {
-            let file_part = reqwest::multipart::Part::bytes(payload.bytes.clone())
-                .file_name(payload.file_name)
-                .mime_str(payload.mime_type)
-                .map_err(|e| AppError::Config(e.to_string()))?;
+        let request = async {
+            let mut attempt = 0u32;
+            loop {
+                let file_part = reqwest::multipart::Part::bytes(payload.bytes.clone())
+                    .file_name(payload.file_name)
+                    .mime_str(payload.mime_type)
+                    .map_err(|e| AppError::Config(e.to_string()))?;
 
-            let mut form = reqwest::multipart::Form::new().part("audio", file_part);
+                let mut form = reqwest::multipart::Form::new().part("audio", file_part);
 
-            if let Some(ref lang) = config.language {
-                form = form.text("language", lang.clone());
-            }
-            if let Some(operation_id) = config.operation_id.as_deref() {
-                form = form
-                    .text("operationId", operation_id.to_string())
-                    .text("stageKey", format!("{operation_id}:stt"))
-                    .text("requestType", "voice_pipeline")
-                    .text("clientVersion", crate::desktop_client_version());
-            }
+                if let Some(ref lang) = config.language {
+                    form = form.text("language", lang.clone());
+                }
+                if let Some(operation_id) = config.operation_id.as_deref() {
+                    form = form
+                        .text("operationId", operation_id.to_string())
+                        .text("stageKey", format!("{operation_id}:stt"))
+                        .text("requestType", "voice_pipeline")
+                        .text("clientVersion", crate::desktop_client_version());
+                }
 
-            let resp_result = with_desktop_client_version(
-                self.client
-                    .post(format!("{}/api/proxy/stt", self.api_base_url)),
-            )
-            .header("Authorization", format!("Bearer {}", config.api_key))
-            .multipart(form)
-            .timeout(request_timeout)
-            .send()
-            .await;
+                let resp_result = with_desktop_client_version(
+                    self.client
+                        .post(format!("{}/api/proxy/stt", self.api_base_url)),
+                )
+                .header("Authorization", format!("Bearer {}", config.api_key))
+                .multipart(form)
+                .timeout(request_timeout)
+                .send()
+                .await;
 
-            match resp_result {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let body = resp.text().await?;
+                match resp_result {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await?;
 
-                    if status.is_success() {
-                        let v: serde_json::Value = serde_json::from_str(&body)
-                            .map_err(|e| AppError::Config(e.to_string()))?;
-                        let text = v["text"].as_str().unwrap_or("").trim().to_string();
+                        if status.is_success() {
+                            let v: serde_json::Value = serde_json::from_str(&body)
+                                .map_err(|e| AppError::Config(e.to_string()))?;
+                            let text = v["text"].as_str().unwrap_or("").trim().to_string();
 
-                        tracing::info!("Cloud STT transcription: {} chars", text.len());
+                            tracing::info!("Cloud STT transcription: {} chars", text.len());
 
-                        return Ok(if text.is_empty() { None } else { Some(text) });
-                    } else if let Some(error) = managed_cloud_error(status.as_u16(), &body) {
-                        return Err(error);
-                    } else if status.as_u16() == 403 {
-                        return Err(cloud_stt_forbidden_error(&body));
-                    } else if status.as_u16() >= 500 && attempt < 2 {
-                        let truncate_at = body
-                            .char_indices()
-                            .take_while(|&(i, _)| i < 200)
-                            .last()
-                            .map(|(i, c)| i + c.len_utf8())
-                            .unwrap_or(body.len());
-                        tracing::warn!(
-                            "Cloud STT server error {} (attempt {}/3): {}",
-                            status,
-                            attempt + 1,
-                            &body[..truncate_at]
-                        );
+                            return Ok(if text.is_empty() { None } else { Some(text) });
+                        } else if let Some(error) = managed_cloud_error(status.as_u16(), &body) {
+                            return Err(error);
+                        } else if status.as_u16() == 403 {
+                            return Err(cloud_stt_forbidden_error(&body));
+                        } else if status.as_u16() >= 500 && attempt < 2 {
+                            let truncate_at = body
+                                .char_indices()
+                                .take_while(|&(i, _)| i < 200)
+                                .last()
+                                .map(|(i, c)| i + c.len_utf8())
+                                .unwrap_or(body.len());
+                            tracing::warn!(
+                                "Cloud STT server error {} (attempt {}/3): {}",
+                                status,
+                                attempt + 1,
+                                &body[..truncate_at]
+                            );
+                            attempt += 1;
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                1000 * 2u64.pow(attempt - 1),
+                            ))
+                            .await;
+                            continue;
+                        } else {
+                            let truncate_at = body
+                                .char_indices()
+                                .take_while(|&(i, _)| i < 200)
+                                .last()
+                                .map(|(i, c)| i + c.len_utf8())
+                                .unwrap_or(body.len());
+                            let sanitized = &body[..truncate_at];
+                            tracing::error!("Cloud STT HTTP {}: {}", status, sanitized);
+                            return Err(AppError::Api {
+                                status: status.as_u16(),
+                                body: sanitized.to_string(),
+                            });
+                        }
+                    }
+                    Err(e) if e.is_timeout() && attempt < 2 => {
+                        tracing::warn!("Cloud STT timeout (attempt {}/3)", attempt + 1);
                         attempt += 1;
                         tokio::time::sleep(std::time::Duration::from_millis(
                             1000 * 2u64.pow(attempt - 1),
                         ))
                         .await;
                         continue;
-                    } else {
-                        let truncate_at = body
-                            .char_indices()
-                            .take_while(|&(i, _)| i < 200)
-                            .last()
-                            .map(|(i, c)| i + c.len_utf8())
-                            .unwrap_or(body.len());
-                        let sanitized = &body[..truncate_at];
-                        tracing::error!("Cloud STT HTTP {}: {}", status, sanitized);
-                        return Err(AppError::Api {
-                            status: status.as_u16(),
-                            body: sanitized.to_string(),
-                        });
                     }
+                    Err(e) => return Err(e.into()),
                 }
-                Err(e) if e.is_timeout() && attempt < 2 => {
-                    tracing::warn!("Cloud STT timeout (attempt {}/3)", attempt + 1);
-                    attempt += 1;
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        1000 * 2u64.pow(attempt - 1),
-                    ))
-                    .await;
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
             }
-        }
+        };
+        tokio::time::timeout(request_timeout, request)
+            .await
+            .unwrap_or(Err(AppError::Timeout(request_timeout)))
     }
 
     fn name(&self) -> &str {

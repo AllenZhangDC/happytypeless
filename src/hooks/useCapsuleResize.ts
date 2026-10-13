@@ -35,6 +35,17 @@ export interface CapsuleMonitorGeometry extends CapsuleMonitorBounds, CapsulePla
 
 export interface CapsuleWindowRect extends PhysicalPoint, PhysicalDimensions {}
 
+export function getCapsuleResizePosition(
+  previous: CapsuleWindowRect,
+  logicalSize: CapsuleSize,
+  scaleFactor: number,
+): PhysicalPoint {
+  return {
+    x: Math.round(previous.x + (previous.width - logicalSize.width * scaleFactor) / 2),
+    y: Math.round(previous.y + (previous.height - logicalSize.height * scaleFactor) / 2),
+  }
+}
+
 const CAPSULE_BOTTOM_MARGIN = 80
 
 function clamp(value: number, min: number, max: number): number {
@@ -196,10 +207,31 @@ export function useCapsuleResize() {
           availableMonitors,
           currentMonitor,
           primaryMonitor,
+          monitorFromPoint,
+          Window,
         }) => {
           if (!isCurrent()) return
 
           const win = getCurrentWindow()
+          const anchorMonitor = async () => {
+            try {
+              const main = await Window.getByLabel('main')
+              if (main) {
+                const [position, dimensions] = await Promise.all([
+                  main.outerPosition(),
+                  main.outerSize(),
+                ])
+                const monitor = await monitorFromPoint(
+                  position.x + dimensions.width / 2,
+                  position.y + dimensions.height / 2,
+                )
+                if (monitor) return monitor
+              }
+            } catch {
+              /* fall back when the main window is absent or minimized */
+            }
+            return primaryMonitor().catch(() => null)
+          }
           if (!isCurrent()) return
           await win.setFocusable(getCapsuleFocusable()).catch(() => {})
           if (!isCurrent()) return
@@ -214,11 +246,11 @@ export function useCapsuleResize() {
               const monitors = await availableMonitors()
               if (!isCurrent()) return
 
-              let monitor = await currentMonitor().catch(() => null)
+              let monitor = await anchorMonitor()
               if (!isCurrent()) return
 
               if (!monitor) {
-                monitor = await primaryMonitor().catch(() => null)
+                monitor = await currentMonitor().catch(() => null)
                 if (!isCurrent()) return
               }
               monitor ??= monitors[0]
@@ -250,9 +282,7 @@ export function useCapsuleResize() {
             return
           }
 
-          // Subsequent resizes: left edge + vertical center stay fixed.
-          // Since content is always padded 12px each side, the capsule at x=12
-          // is identical to a centered capsule — so the mic icon never moves.
+          // Keep the center stable when the idle bubble expands into a recording bar.
           const prev = prevWindowSize.current
           if (prev) {
             const pos = await win.outerPosition().catch(() => null)
@@ -272,10 +302,37 @@ export function useCapsuleResize() {
               if (!isCurrent()) return
 
               const oldHeight = oldSize?.height ?? Math.round(prev.height * scale)
+              const oldWidth = oldSize?.width ?? Math.round(prev.width * scale)
               const physicalWidth = Math.round(windowWidth * scale)
               const physicalHeight = Math.round(windowHeight * scale)
-              let newX = pos.x
-              let newY = Math.round(pos.y + oldHeight / 2 - physicalHeight / 2)
+              let { x: newX, y: newY } = getCapsuleResizePosition(
+                { ...pos, width: oldWidth, height: oldHeight },
+                { width: windowWidth, height: windowHeight },
+                scale,
+              )
+
+              if (
+                pipelineState === 'preparing' ||
+                pipelineState === 'recording' ||
+                pipelineState === 'ask_recording' ||
+                hasError
+              ) {
+                const anchor = await anchorMonitor()
+                if (!isCurrent()) return
+                if (
+                  anchor &&
+                  (!monitor ||
+                    anchor.position.x !== monitor.position.x ||
+                    anchor.position.y !== monitor.position.y)
+                ) {
+                  const centered = getCapsuleBottomCenterPosition(anchor, {
+                    width: windowWidth,
+                    height: windowHeight,
+                  })
+                  newX = centered.x
+                  newY = centered.y
+                }
+              }
 
               if (!isCurrent()) return
               await win.setSize(new LogicalSize(windowWidth, windowHeight)).catch(() => {})
