@@ -17,6 +17,7 @@ pub mod recording_deadline;
 pub mod selection;
 pub mod storage;
 pub mod stt;
+pub mod stt_finalize;
 pub mod tray;
 pub mod voice_intent;
 

@@ -4,10 +4,15 @@ use std::time::Duration;
 // reqwest's timeout also covers response bodies, including streamed LLM output.
 pub const LLM_TIMEOUT: Duration = Duration::from_secs(180);
 pub const ASK_TIMEOUT: Duration = Duration::from_secs(75);
+pub const STT_MAX_TIMEOUT: Duration = Duration::from_secs(360);
 
 pub fn stt_timeout(payload_bytes: usize) -> Duration {
     let upload_seconds = (payload_bytes as u64).div_ceil(32_000);
-    Duration::from_secs(225_u64.saturating_add(upload_seconds).min(360))
+    Duration::from_secs(
+        225_u64
+            .saturating_add(upload_seconds)
+            .min(STT_MAX_TIMEOUT.as_secs()),
+    )
 }
 
 #[cfg(test)]
@@ -33,7 +38,9 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut buffer = [0; 4096];
-            socket.read(&mut buffer).unwrap();
+            if socket.read(&mut buffer).unwrap() == 0 {
+                return;
+            }
             // Timeout must cover the complete body after response headers.
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n")

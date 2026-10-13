@@ -19,6 +19,17 @@ pub struct WhisperCompatConfig {
 /// Max audio buffer: ~24 MB PCM ≈ 12.5 min at 16kHz 16-bit mono.
 /// Keeps the resulting WAV under 25 MB (OpenAI/Groq limit).
 const MAX_AUDIO_BYTES: usize = 24 * 1024 * 1024;
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+// Three HTTP attempts, two backoffs (1s + 2s), and a small finalization margin.
+pub const FINALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(198);
+
+fn upload_error(error: reqwest::Error) -> AppError {
+    if error.is_timeout() {
+        AppError::Timeout(REQUEST_TIMEOUT)
+    } else {
+        error.into()
+    }
+}
 
 /// Generic provider for any OpenAI Whisper-compatible transcription API.
 /// Works with: OpenAI, Groq, SiliconFlow, GLM-ASR.
@@ -161,7 +172,7 @@ impl SttProvider for WhisperCompatProvider {
                 .client
                 .post(&self.provider_config.endpoint)
                 .multipart(form)
-                .timeout(std::time::Duration::from_secs(60));
+                .timeout(REQUEST_TIMEOUT);
 
             if !config.api_key.trim().is_empty() {
                 request = request.header("Authorization", format!("Bearer {}", config.api_key));
@@ -172,7 +183,7 @@ impl SttProvider for WhisperCompatProvider {
             match resp_result {
                 Ok(resp) => {
                     let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
+                    let body = resp.text().await.map_err(upload_error)?;
 
                     if status.is_success() {
                         let v: serde_json::Value = serde_json::from_str(&body)
@@ -240,7 +251,7 @@ impl SttProvider for WhisperCompatProvider {
                     .await;
                     continue;
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(upload_error(e)),
             }
         }
     }
@@ -253,6 +264,35 @@ impl SttProvider for WhisperCompatProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn incomplete_response_body_is_reported_as_a_transport_error() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).unwrap() > 0);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\nConnection: close\r\n\r\n{\"text\":\"").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+        let mut provider = WhisperCompatProvider::new(WhisperCompatConfig {
+            provider_name: "custom-whisper".to_string(),
+            endpoint: format!("http://{address}/transcriptions"),
+            model: "test-model".to_string(),
+            extra_fields: vec![],
+            api_key_required: false,
+        });
+        provider.connect(&SttConfig::default()).await.unwrap();
+        provider.send_audio(&[0, 0]).await.unwrap();
+        let error = provider.disconnect().await.unwrap_err();
+        assert!(matches!(error, AppError::Network(_)), "{error:?}");
+        server.join().unwrap();
+    }
 
     #[tokio::test]
     async fn connect_allows_empty_api_key_when_not_required() {
