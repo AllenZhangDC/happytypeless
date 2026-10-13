@@ -16,6 +16,7 @@ const staleConfig: AppConfig = {
 
 describe('provider key persistence across a settings save', () => {
   const vault = new Map<string, string>()
+  let nativeConfig: AppConfig
   beforeEach(() => {
     vault.clear()
     vi.mocked(invoke)
@@ -32,10 +33,12 @@ describe('provider key persistence across a settings save', () => {
         if (command === 'update_config') {
           // Model the original backend migration, which imported every nonempty key.
           const c = input.config
+          nativeConfig = c
           if (c.stt_api_key) vault.set(`stt.${c.stt_provider}`, c.stt_api_key)
           if (c.stt_custom_api_key) vault.set('stt.custom-whisper', c.stt_custom_api_key)
           if (c.llm_api_key) vault.set(`llm.${c.llm_provider}`, c.llm_api_key)
         }
+        if (command === 'get_config') return nativeConfig as never
         return undefined as never
       })
   })
@@ -62,6 +65,22 @@ describe('provider key persistence across a settings save', () => {
     expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'update_config')).toBe(
       false,
     )
+  })
+
+  it('returns backend recording limits after onboarding instead of the stale draft', async () => {
+    vi.mocked(invoke).mockImplementation(async (command) =>
+      command === 'get_config'
+        ? ({
+            ...staleConfig,
+            stt_api_key: '',
+            stt_custom_api_key: '',
+            llm_api_key: '',
+            max_recording_seconds: 600,
+          } as never)
+        : (undefined as never),
+    )
+    const saved = await saveOnboardingConfig({ ...staleConfig, max_recording_seconds: 30 })
+    expect(saved.max_recording_seconds).toBe(600)
   })
 
   it('keeps cloud login credentials out of provider key writes', async () => {

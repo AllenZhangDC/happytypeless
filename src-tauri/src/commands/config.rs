@@ -250,8 +250,11 @@ pub async fn update_config(
     config: storage::AppConfig,
 ) -> Result<(), String> {
     let previous = state.load().await.map_err(|e| e.to_string())?;
-    let config = prepare_config_for_save(config)?;
-    let patch = config_patch_between(&previous, &config);
+    let incoming = config;
+    let config = prepare_config_for_save(storage::config_with_native_managed_state(
+        incoming.clone(),
+        Some(&previous),
+    ))?;
     let refresh_hotkeys = hotkey_runtime_config_changed(&previous, &config);
     let refresh_provider_connections = provider_connection_config_changed(&previous, &config);
 
@@ -273,23 +276,31 @@ pub async fn update_config(
         set_hotkey_registration_error(&hotkey_error, None);
     }
 
-    if let Err(error) = state.save(&config).await.map_err(|e| e.to_string()) {
-        if refresh_hotkeys {
-            let rollback_generation = hotkey_supervisor.wake_for_settings_change();
-            let rollback_error =
-                crate::commands::misc::register_configured_shortcuts(&app, &previous).err();
-            if let Some(rollback_error) = rollback_error {
-                hotkey_supervisor
-                    .record_registration_failure(rollback_generation, rollback_error.clone());
-                set_hotkey_registration_error(&hotkey_error, Some(rollback_error));
-            } else {
-                hotkey_supervisor.record_registration_success(rollback_generation);
-                set_hotkey_registration_error(&hotkey_error, None);
+    let config = match state
+        .save_renderer_config(incoming, prepare_config_for_save)
+        .await
+    {
+        Ok(config) => config,
+        Err(error) => {
+            let error = error.to_string();
+            if refresh_hotkeys {
+                let rollback_generation = hotkey_supervisor.wake_for_settings_change();
+                let rollback_error =
+                    crate::commands::misc::register_configured_shortcuts(&app, &previous).err();
+                if let Some(rollback_error) = rollback_error {
+                    hotkey_supervisor
+                        .record_registration_failure(rollback_generation, rollback_error.clone());
+                    set_hotkey_registration_error(&hotkey_error, Some(rollback_error));
+                } else {
+                    hotkey_supervisor.record_registration_success(rollback_generation);
+                    set_hotkey_registration_error(&hotkey_error, None);
+                }
             }
+            return Err(error);
         }
-        return Err(error);
-    }
+    };
 
+    let patch = config_patch_between(&previous, &config);
     update_runtime_caches(&cache, &ask_cache, &role_cache, &close_tray_cache, &config);
     emit_config_patch(&app, &patch);
     if patch.get("ui_language").is_some() || patch.get("capsule_auto_hide").is_some() {
@@ -622,6 +633,94 @@ mod tests {
         assert!(prepared.stt_api_key.is_empty());
         assert!(prepared.stt_custom_api_key.is_empty());
         assert!(prepared.llm_api_key.is_empty());
+    }
+
+    fn native_cloud_config(user_id: &str, age_hours: i64) -> storage::AppConfig {
+        use crate::stt::capabilities::{
+            ManagedSttCapability, ManagedSttCapabilityState, ManagedSttFormat,
+        };
+        let received = chrono::Utc::now() - chrono::Duration::hours(age_hours);
+        storage::AppConfig {
+            stt_provider: "cloud".to_string(),
+            managed_stt_capability_state: Some(ManagedSttCapabilityState {
+                user_id: user_id.to_string(),
+                server_generated_at: received.to_rfc3339(),
+                received_at_unix_seconds: received.timestamp(),
+                capability: ManagedSttCapability {
+                    version: 2,
+                    max_recording_seconds: 600,
+                    max_multipart_bytes: 4_200_000,
+                    formats: vec![
+                        ManagedSttFormat {
+                            mime_type: "audio/wav".to_string(),
+                            max_audio_bytes: 4_000_000,
+                            preferred_client_switch_bytes: Some(700_000),
+                            bitrate_bits_per_second: None,
+                        },
+                        ManagedSttFormat {
+                            mime_type: "audio/ogg; codecs=opus".to_string(),
+                            max_audio_bytes: 4_000_000,
+                            preferred_client_switch_bytes: None,
+                            bitrate_bits_per_second: Some(48_000),
+                        },
+                    ],
+                },
+            }),
+            ..storage::AppConfig::default()
+        }
+    }
+
+    #[test]
+    fn onboarding_draft_cannot_clear_a_fresh_native_cloud_limit() {
+        let current = native_cloud_config("current-user", 0);
+        let draft = storage::AppConfig {
+            stt_provider: "cloud".to_string(),
+            theme: "dark".to_string(),
+            ..storage::AppConfig::default()
+        };
+        let saved = prepare_config_for_save(storage::config_with_native_managed_state(
+            draft,
+            Some(&current),
+        ))
+        .unwrap();
+        assert_eq!(saved.max_recording_seconds, 600);
+        assert_eq!(saved.theme, "dark");
+        assert_eq!(
+            saved.managed_stt_capability_state,
+            current.managed_stt_capability_state
+        );
+    }
+
+    #[test]
+    fn settings_snapshot_cannot_replace_a_newer_native_capability() {
+        let current = native_cloud_config("current-user", 0);
+        let stale_draft = native_cloud_config("old-user", 25);
+        let saved = prepare_config_for_save(storage::config_with_native_managed_state(
+            stale_draft,
+            Some(&current),
+        ))
+        .unwrap();
+        assert_eq!(saved.max_recording_seconds, 600);
+        assert_eq!(
+            saved.managed_stt_capability_state.unwrap().user_id,
+            "current-user"
+        );
+    }
+
+    #[test]
+    fn settings_save_cannot_resurrect_a_capability_cleared_on_logout() {
+        let cleared = storage::AppConfig {
+            stt_provider: "cloud".to_string(),
+            ..storage::AppConfig::default()
+        };
+        let draft = native_cloud_config("logged-out-user", 0);
+        let saved = prepare_config_for_save(storage::config_with_native_managed_state(
+            draft,
+            Some(&cleared),
+        ))
+        .unwrap();
+        assert!(saved.managed_stt_capability_state.is_none());
+        assert_eq!(saved.max_recording_seconds, 30);
     }
 
     #[test]

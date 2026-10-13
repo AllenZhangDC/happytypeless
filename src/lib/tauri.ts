@@ -139,7 +139,7 @@ export async function saveOnboardingConfig(config: AppConfig): Promise<AppConfig
   }
   const sanitized = configWithoutProviderSecrets(config)
   await updateConfig(sanitized)
-  return sanitized
+  return getConfig()
 }
 
 export type RecordingLimitMode = 'auto' | 'custom'
