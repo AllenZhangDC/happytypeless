@@ -5,6 +5,7 @@ import {
   getCapsuleBottomCenterPosition,
   getCapsuleFocusable,
   getCapsuleRecoveryPosition,
+  getCapsuleResizePosition,
   getCapsuleVisibility,
   isCapsuleVisibleOnAnyMonitor,
   useCapsuleResize,
@@ -16,6 +17,8 @@ const windowApiMocks = vi.hoisted(() => ({
   availableMonitors: vi.fn(),
   currentMonitor: vi.fn(),
   primaryMonitor: vi.fn(),
+  getMainWindow: vi.fn(),
+  monitorFromPoint: vi.fn(),
   setFocusable: vi.fn(),
   setSize: vi.fn(),
   setPosition: vi.fn(),
@@ -46,12 +49,22 @@ vi.mock('@tauri-apps/api/window', () => {
     availableMonitors: windowApiMocks.availableMonitors,
     currentMonitor: windowApiMocks.currentMonitor,
     primaryMonitor: windowApiMocks.primaryMonitor,
+    Window: { getByLabel: windowApiMocks.getMainWindow },
+    monitorFromPoint: windowApiMocks.monitorFromPoint,
     LogicalSize,
     PhysicalPosition,
   }
 })
 
 const logicalCapsuleSize = { width: 224, height: 60 }
+
+describe('capsule centering while expanding', () => {
+  it.each([1, 1.75, 2])('keeps the same center at scale %s', (scale) => {
+    const before = { x: 1560 - 30 * scale, y: 1800, width: 60 * scale, height: 60 * scale }
+    const after = getCapsuleResizePosition(before, logicalCapsuleSize, scale)
+    expect(after.x + (logicalCapsuleSize.width * scale) / 2).toBe(1560)
+  })
+})
 
 describe('getCapsuleVisibility', () => {
   it('hides idle capsule when auto-hide is enabled', () => {
@@ -327,6 +340,8 @@ describe('useCapsuleResize async updates', () => {
     windowApiMocks.availableMonitors.mockReset().mockResolvedValue([monitor])
     windowApiMocks.currentMonitor.mockReset().mockResolvedValue(monitor)
     windowApiMocks.primaryMonitor.mockReset().mockResolvedValue(monitor)
+    windowApiMocks.getMainWindow.mockReset().mockResolvedValue(null)
+    windowApiMocks.monitorFromPoint.mockReset().mockResolvedValue(null)
     windowApiMocks.setFocusable.mockReset().mockResolvedValue(undefined)
     windowApiMocks.setSize.mockReset().mockResolvedValue(undefined)
     windowApiMocks.setPosition.mockReset().mockResolvedValue(undefined)
@@ -340,6 +355,39 @@ describe('useCapsuleResize async updates', () => {
   afterEach(() => {
     cleanup()
   })
+
+  it.each(['preparing', 'recording', 'idle'] as const)(
+    'moves a capsule from a secondary monitor for %s or an error',
+    async (pipelineState) => {
+      const secondary = {
+        ...monitor,
+        position: { x: 1920, y: 0 },
+        workArea: { position: { x: 1920, y: 0 }, size: { width: 1920, height: 1040 } },
+      }
+      windowApiMocks.availableMonitors.mockResolvedValue([monitor, secondary])
+      windowApiMocks.currentMonitor.mockResolvedValue(secondary)
+      windowApiMocks.outerPosition.mockResolvedValue({ x: 2800, y: 900 })
+      windowApiMocks.getMainWindow.mockResolvedValue({
+        outerPosition: async () => ({ x: 100, y: 100 }),
+        outerSize: async () => ({ width: 900, height: 700 }),
+      })
+      windowApiMocks.monitorFromPoint.mockResolvedValue(monitor)
+      render(createElement(HookHarness))
+      await waitFor(() => expect(windowApiMocks.hide).toHaveBeenCalled())
+      windowApiMocks.setPosition.mockClear()
+      act(() =>
+        useAppStore.setState({
+          pipelineState,
+          pipelineError: pipelineState === 'idle' ? 'Recognition failed' : null,
+        }),
+      )
+      await waitFor(() => expect(windowApiMocks.show).toHaveBeenCalled())
+      const position = windowApiMocks.setPosition.mock.lastCall?.[0]
+      const size = windowApiMocks.setSize.mock.lastCall?.[0]
+      expect(position.x + size.width / 2).toBe(960)
+      expect(position.y).toBe(900)
+    },
+  )
 
   it('prevents a superseded async resize from overwriting the latest window state', async () => {
     render(createElement(HookHarness))
