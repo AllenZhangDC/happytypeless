@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useAppStore } from '../appStore'
+import { bindingFromHotkey, hotkeyFromBinding, useAppStore } from '../appStore'
 import type { HistoryEntry, DictionaryEntry, CorrectionRule } from '../appStore'
 
 function getState() {
@@ -46,6 +46,20 @@ describe('appStore', () => {
   })
 
   describe('config', () => {
+    it('round trips a Control Command modifier-only dictation shortcut', () => {
+      const binding = bindingFromHotkey('Control+Win')
+      expect(binding).toEqual({ primary: '', modifiers: ['Super', 'Ctrl'] })
+      expect(hotkeyFromBinding(binding!)).toBe('Super+Ctrl')
+      expect(bindingFromHotkey('Ctrl+Shift')).toBeNull()
+      getState().updateConfig({
+        hotkeys: {
+          ...getState().config.hotkeys,
+          dictation: binding!,
+          dictationBindings: [binding!],
+        },
+      })
+      expect(getState().config.hotkey).toBe('Super+Ctrl')
+    })
     it('has sensible defaults', () => {
       const { config } = getState()
       const isMac =

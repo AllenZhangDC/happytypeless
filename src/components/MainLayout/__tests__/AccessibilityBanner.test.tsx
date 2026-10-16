@@ -128,6 +128,17 @@ describe('AccessibilityBanner', () => {
     expect(screen.queryByRole('button', { name: 'Grant' })).not.toBeInTheDocument()
   })
 
+  it('requires Accessibility for Control Command native shortcut with copy-only output', () => {
+    Object.assign(mockStore.config, {
+      hotkey: 'Command+Ctrl',
+      output_mode: 'clipboard',
+      insertion_strategy: 'clipboardCopyOnly',
+      hotkeys: { dictation: { primary: '', modifiers: ['Command', 'Ctrl'] } },
+    })
+    render(<AccessibilityBanner />)
+    expect(screen.getByRole('button', { name: 'Grant' })).toBeInTheDocument()
+  })
+
   it('still requires Accessibility when Fn is a secondary copy-only shortcut', () => {
     Object.assign(mockStore.config, {
       hotkey: 'Ctrl+/',

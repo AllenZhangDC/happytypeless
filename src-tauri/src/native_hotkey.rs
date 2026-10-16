@@ -5,6 +5,7 @@ use tauri_plugin_global_shortcut::ShortcutState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NativeHotkeyTrigger {
+    ControlCommand,
     Fn,
     FnSpace,
     FnLeftShift,
@@ -16,6 +17,7 @@ pub enum NativeHotkeyTrigger {
 impl NativeHotkeyTrigger {
     pub fn canonical(self) -> &'static str {
         match self {
+            Self::ControlCommand => "Ctrl+Command",
             Self::Fn => "Fn",
             Self::FnSpace => "Fn+Space",
             Self::FnLeftShift => "Fn+LeftShift",
@@ -28,6 +30,7 @@ impl NativeHotkeyTrigger {
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
     fn base(self) -> NativeHotkeyTrigger {
         match self {
+            Self::ControlCommand => Self::ControlCommand,
             Self::Fn | Self::FnSpace | Self::FnLeftShift => Self::Fn,
             Self::RightAlt | Self::RightAltSpace | Self::RightAltLeftShift => Self::RightAlt,
         }
@@ -36,6 +39,7 @@ impl NativeHotkeyTrigger {
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
     fn combo_key(self) -> Option<NativeComboKey> {
         match self {
+            Self::ControlCommand => None,
             Self::FnSpace | Self::RightAltSpace => Some(NativeComboKey::Space),
             Self::FnLeftShift | Self::RightAltLeftShift => Some(NativeComboKey::LeftShift),
             Self::Fn | Self::RightAlt => None,
@@ -148,7 +152,7 @@ impl NativeMonitoredBinding {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 fn monitored_bindings_for_base(
     bindings: Vec<NativeHotkeyBinding>,
     base: NativeHotkeyTrigger,
@@ -313,11 +317,121 @@ fn dispatch_native_combo_edge(
     dispatch_matching_bindings(bindings, trigger, pressed, handler)
 }
 
+#[cfg(any(target_os = "macos", test))]
+#[derive(Default)]
+struct ModifierPairState {
+    pair_down: bool,
+    pending: bool,
+    blocked: bool,
+    active: bool,
+    generation: u64,
+    tap_on_release: bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl ModifierPairState {
+    fn flags_changed(
+        &mut self,
+        control_down: bool,
+        command_down: bool,
+        exact: bool,
+        bindings: &[NativeMonitoredBinding],
+        handler: &NativeHotkeyHandler,
+    ) -> bool {
+        let pair_down = control_down && command_down;
+        if self.pair_down && (!pair_down || !exact) {
+            if !pair_down && self.pending && !self.blocked && self.tap_on_release {
+                let _ = dispatch_matching_bindings(
+                    bindings,
+                    NativeHotkeyTrigger::ControlCommand,
+                    true,
+                    handler,
+                );
+            }
+            self.release(bindings, handler);
+            if !pair_down && self.pending && !self.blocked && self.tap_on_release {
+                let _ = dispatch_matching_bindings(
+                    bindings,
+                    NativeHotkeyTrigger::ControlCommand,
+                    false,
+                    handler,
+                );
+            }
+            self.pending = false;
+            if !exact && pair_down {
+                self.blocked = true;
+            }
+        }
+        if !pair_down {
+            self.pair_down = false;
+            if !control_down && !command_down {
+                self.blocked = false;
+            }
+            return false;
+        }
+        if exact && !self.pair_down && !self.blocked {
+            self.generation = self.generation.wrapping_add(1);
+            self.pending = true;
+            self.pair_down = true;
+            return true;
+        }
+        self.pair_down = true;
+        false
+    }
+
+    fn activate(
+        &mut self,
+        generation: u64,
+        bindings: &[NativeMonitoredBinding],
+        handler: &NativeHotkeyHandler,
+    ) {
+        if self.tap_on_release
+            || !self.pending
+            || !self.pair_down
+            || self.blocked
+            || self.generation != generation
+        {
+            return;
+        }
+        self.pending = false;
+        self.active = dispatch_matching_bindings(
+            bindings,
+            NativeHotkeyTrigger::ControlCommand,
+            true,
+            handler,
+        );
+    }
+
+    fn other_key_down(
+        &mut self,
+        bindings: &[NativeMonitoredBinding],
+        handler: &NativeHotkeyHandler,
+    ) {
+        if self.pair_down {
+            self.pending = false;
+            self.blocked = true;
+            self.release(bindings, handler);
+        }
+    }
+
+    fn release(&mut self, bindings: &[NativeMonitoredBinding], handler: &NativeHotkeyHandler) {
+        if self.active {
+            let _ = dispatch_matching_bindings(
+                bindings,
+                NativeHotkeyTrigger::ControlCommand,
+                false,
+                handler,
+            );
+            self.active = false;
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{
         activate_pending_hold_base, dispatch_native_base_edge, dispatch_native_combo_edge,
-        monitored_bindings_for_base, NativeComboKey, NativeComboState, NativeHotkeyHandler,
+        ModifierPairState, NativeComboKey, NativeComboState, NativeHotkeyHandler,
         NativeHotkeyTrigger, NativeMonitoredBinding,
     };
     use std::ffi::c_void;
@@ -368,6 +482,9 @@ mod platform {
     const KEYBOARD_EVENT_KEYCODE: CgEventField = 9;
     const FLAG_MASK_SECONDARY_FN: CgEventFlags = 0x0080_0000;
     const FLAG_MASK_SHIFT: CgEventFlags = 0x0002_0000;
+    const FLAG_MASK_CONTROL: CgEventFlags = 0x0004_0000;
+    const FLAG_MASK_OPTION: CgEventFlags = 0x0008_0000;
+    const FLAG_MASK_COMMAND: CgEventFlags = 0x0010_0000;
     const FN_KEYCODE: i64 = 63;
     const SPACE_KEYCODE: i64 = 49;
     const LEFT_SHIFT_KEYCODE: i64 = 56;
@@ -453,10 +570,10 @@ mod platform {
             hold_dictation: bool,
             handler: NativeHotkeyHandler,
         ) -> Result<Self, String> {
-            let bindings = monitored_bindings_for_base(bindings, NativeHotkeyTrigger::Fn);
-            if bindings.is_empty() {
-                return Err("macOS native hotkeys currently support Fn only".to_string());
-            }
+            let bindings: Vec<NativeMonitoredBinding> = bindings
+                .into_iter()
+                .map(NativeMonitoredBinding::new)
+                .collect();
 
             let handles = Arc::new(MacShutdownHandles::new());
             let thread_handles = Arc::clone(&handles);
@@ -505,6 +622,7 @@ mod platform {
         handler: NativeHotkeyHandler,
         handles: Arc<MacShutdownHandles>,
         state: Arc<Mutex<NativeComboState>>,
+        modifier_pair: Arc<Mutex<ModifierPairState>>,
     }
 
     fn run_event_tap_loop(
@@ -519,6 +637,11 @@ mod platform {
                 binding.binding.trigger == NativeHotkeyTrigger::Fn
                     && binding.binding.role == crate::hotkey::HotkeyRole::Dictation
             });
+        let tap_on_release = !hold_dictation
+            || bindings.iter().any(|binding| {
+                binding.binding.trigger == NativeHotkeyTrigger::ControlCommand
+                    && binding.binding.role != crate::hotkey::HotkeyRole::Dictation
+            });
         let context = Box::into_raw(Box::new(CallbackContext {
             bindings: Arc::new(bindings),
             handler,
@@ -526,6 +649,10 @@ mod platform {
             state: Arc::new(Mutex::new(NativeComboState {
                 hold_base,
                 ..NativeComboState::default()
+            })),
+            modifier_pair: Arc::new(Mutex::new(ModifierPairState {
+                tap_on_release,
+                ..ModifierPairState::default()
             })),
         }));
         let mask: CgEventMask = (1u64 << FLAGS_CHANGED) | (1u64 << KEY_DOWN) | (1u64 << KEY_UP);
@@ -622,6 +749,17 @@ mod platform {
                     &context.handler,
                 );
                 drop(state);
+                let mut pair = context
+                    .modifier_pair
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                pair.release(&context.bindings, &context.handler);
+                let tap_on_release = pair.tap_on_release;
+                *pair = ModifierPairState {
+                    tap_on_release,
+                    ..ModifierPairState::default()
+                };
+                drop(pair);
                 if let Some(tap) = context
                     .handles
                     .tap
@@ -644,8 +782,52 @@ mod platform {
     fn handle_flags_changed(context: &CallbackContext, event: CgEventRef) {
         let keycode = unsafe { CGEventGetIntegerValueField(event, KEYBOARD_EVENT_KEYCODE) };
         let flags = unsafe { CGEventGetFlags(event) };
+        if context
+            .bindings
+            .iter()
+            .any(|binding| binding.binding.trigger == NativeHotkeyTrigger::ControlCommand)
+        {
+            let control_down = flags & FLAG_MASK_CONTROL != 0;
+            let command_down = flags & FLAG_MASK_COMMAND != 0;
+            let pair_down = control_down && command_down;
+            let exact = pair_down
+                && flags & (FLAG_MASK_SHIFT | FLAG_MASK_OPTION | FLAG_MASK_SECONDARY_FN) == 0;
+            let mut state = context
+                .modifier_pair
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if state.flags_changed(
+                control_down,
+                command_down,
+                exact,
+                &context.bindings,
+                &context.handler,
+            ) {
+                let generation = state.generation;
+                let state = Arc::clone(&context.modifier_pair);
+                let bindings = Arc::clone(&context.bindings);
+                let handler = Arc::clone(&context.handler);
+                let handles = Arc::clone(&context.handles);
+                if let Err(error) = thread::Builder::new()
+                    .name("opentypeless-modifier-pair-delay".to_string())
+                    .spawn(move || {
+                        thread::sleep(HOLD_COMBO_GRACE_PERIOD);
+                        if handles.cancelled.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                        state.activate(generation, &bindings, &handler);
+                    })
+                {
+                    tracing::warn!("Failed to schedule modifier-pair hotkey: {error}");
+                }
+            }
+        }
         if keycode == FN_KEYCODE {
             let pressed = (flags & FLAG_MASK_SECONDARY_FN) != 0;
+            if pressed && flags & (FLAG_MASK_CONTROL | FLAG_MASK_COMMAND) != 0 {
+                return;
+            }
             let mut state = context.state.lock().unwrap_or_else(|e| e.into_inner());
             let was_pressed = state.base_pressed;
             let _ = dispatch_native_base_edge(
@@ -699,6 +881,13 @@ mod platform {
     }
 
     fn handle_key_event(context: &CallbackContext, event: CgEventRef, pressed: bool) {
+        if pressed {
+            context
+                .modifier_pair
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .other_key_down(&context.bindings, &context.handler);
+        }
         let keycode = unsafe { CGEventGetIntegerValueField(event, KEYBOARD_EVENT_KEYCODE) };
         if keycode != SPACE_KEYCODE {
             return;
@@ -1065,6 +1254,102 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modifier_pair_emits_one_hold_press_and_release() {
+        let bindings = vec![NativeMonitoredBinding::new(NativeHotkeyBinding {
+            role: crate::hotkey::HotkeyRole::Dictation,
+            index: 0,
+            trigger: NativeHotkeyTrigger::ControlCommand,
+        })];
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let handler: NativeHotkeyHandler =
+            Arc::new(move |event| captured.lock().unwrap().push(event.state));
+        let mut state = ModifierPairState::default();
+        state.flags_changed(true, false, false, &bindings, &handler);
+        state.flags_changed(true, true, true, &bindings, &handler);
+        let generation = state.generation;
+        state.activate(generation, &bindings, &handler);
+        state.flags_changed(true, true, true, &bindings, &handler);
+        state.flags_changed(false, true, false, &bindings, &handler);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![ShortcutState::Pressed, ShortcutState::Released]
+        );
+    }
+
+    #[test]
+    fn modifier_pair_rejects_other_keys_and_requires_full_release_before_retry() {
+        let bindings = vec![NativeMonitoredBinding::new(NativeHotkeyBinding {
+            role: crate::hotkey::HotkeyRole::Dictation,
+            index: 0,
+            trigger: NativeHotkeyTrigger::ControlCommand,
+        })];
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let handler: NativeHotkeyHandler =
+            Arc::new(move |event| captured.lock().unwrap().push(event.state));
+        let mut state = ModifierPairState::default();
+        state.flags_changed(true, true, true, &bindings, &handler);
+        let generation = state.generation;
+        state.other_key_down(&bindings, &handler);
+        state.activate(generation, &bindings, &handler);
+        state.flags_changed(false, true, false, &bindings, &handler);
+        state.flags_changed(true, true, true, &bindings, &handler);
+        assert!(events.lock().unwrap().is_empty());
+        state.flags_changed(false, false, false, &bindings, &handler);
+        state.flags_changed(true, true, true, &bindings, &handler);
+        state.activate(state.generation, &bindings, &handler);
+        assert_eq!(*events.lock().unwrap(), vec![ShortcutState::Pressed]);
+    }
+
+    #[test]
+    fn modifier_pair_quick_tap_emits_single_toggle_press() {
+        let bindings = vec![NativeMonitoredBinding::new(NativeHotkeyBinding {
+            role: crate::hotkey::HotkeyRole::Dictation,
+            index: 0,
+            trigger: NativeHotkeyTrigger::ControlCommand,
+        })];
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let handler: NativeHotkeyHandler =
+            Arc::new(move |event| captured.lock().unwrap().push(event.state));
+        let mut state = ModifierPairState {
+            tap_on_release: true,
+            ..ModifierPairState::default()
+        };
+        state.flags_changed(true, true, true, &bindings, &handler);
+        state.flags_changed(false, true, false, &bindings, &handler);
+        state.flags_changed(false, false, false, &bindings, &handler);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![ShortcutState::Pressed, ShortcutState::Released]
+        );
+    }
+
+    #[test]
+    fn toggle_pair_waits_for_release_and_rejects_late_letter_key() {
+        let bindings = vec![NativeMonitoredBinding::new(NativeHotkeyBinding {
+            role: crate::hotkey::HotkeyRole::Dictation,
+            index: 0,
+            trigger: NativeHotkeyTrigger::ControlCommand,
+        })];
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let handler: NativeHotkeyHandler =
+            Arc::new(move |event| captured.lock().unwrap().push(event.state));
+        let mut state = ModifierPairState {
+            tap_on_release: true,
+            ..ModifierPairState::default()
+        };
+        state.flags_changed(true, true, true, &bindings, &handler);
+        state.activate(state.generation, &bindings, &handler);
+        assert!(events.lock().unwrap().is_empty());
+        state.other_key_down(&bindings, &handler);
+        state.flags_changed(false, false, false, &bindings, &handler);
+        assert!(events.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn held_state_dedupes_repeat_edges() {

@@ -29,10 +29,14 @@ vi.mock('react-i18next', () => ({
 const ctrlSlash = { primary: '/', modifiers: ['Ctrl'] }
 const f8 = { primary: 'F8', modifiers: [] }
 const f9 = { primary: 'F9', modifiers: [] }
+const originalPlatform = navigator.platform
 
 describe('ShortcutBindingList', () => {
   beforeEach(() => vi.clearAllMocks())
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    Object.defineProperty(navigator, 'platform', { configurable: true, value: originalPlatform })
+  })
 
   it('keeps a single required binding visually quiet', () => {
     render(
@@ -194,5 +198,73 @@ describe('ShortcutBindingList', () => {
     unmount()
 
     expect(tauri.resumeHotkey).toHaveBeenCalled()
+  })
+
+  it('captures Control and Command alone on macOS without a letter key', () => {
+    Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' })
+    const onChange = vi.fn()
+    render(
+      <ShortcutBindingList
+        role="dictation"
+        label="Dictate"
+        bindings={[ctrlSlash]}
+        otherBindings={[]}
+        required
+        specialOptions={[]}
+        onChange={onChange}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Ctrl+/' }))
+    fireEvent.keyDown(window, { key: 'Control', ctrlKey: true })
+    fireEvent.keyDown(window, { key: 'Meta', ctrlKey: true, metaKey: true })
+    fireEvent.keyUp(window, { key: 'Meta', ctrlKey: true })
+    fireEvent.keyUp(window, { key: 'Control' })
+    fireEvent.click(screen.getByRole('button', { name: 'Command+Ctrl' }))
+    expect(onChange).toHaveBeenCalledWith([{ primary: '', modifiers: ['Command', 'Ctrl'] }])
+  })
+
+  it('prefers the full Control Command letter shortcut when a letter follows', () => {
+    Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' })
+    const onChange = vi.fn()
+    render(
+      <ShortcutBindingList
+        role="dictation"
+        label="Dictate"
+        bindings={[ctrlSlash]}
+        otherBindings={[]}
+        required
+        specialOptions={[]}
+        onChange={onChange}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Ctrl+/' }))
+    fireEvent.keyDown(window, { key: 'Control', ctrlKey: true })
+    fireEvent.keyDown(window, { key: 'Meta', ctrlKey: true, metaKey: true })
+    fireEvent.keyDown(window, { key: 'X', ctrlKey: true, metaKey: true })
+    fireEvent.click(screen.getByRole('button', { name: 'Command+Ctrl+X' }))
+    expect(onChange).toHaveBeenCalledWith([{ primary: 'X', modifiers: ['Command', 'Ctrl'] }])
+  })
+
+  it('does not save a pure pair after Shift was part of the capture', () => {
+    Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' })
+    const onChange = vi.fn()
+    render(
+      <ShortcutBindingList
+        role="dictation"
+        label="Dictate"
+        bindings={[ctrlSlash]}
+        otherBindings={[]}
+        required
+        specialOptions={[]}
+        onChange={onChange}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Ctrl+/' }))
+    fireEvent.keyDown(window, { key: 'Control', ctrlKey: true })
+    fireEvent.keyDown(window, { key: 'Meta', ctrlKey: true, metaKey: true })
+    fireEvent.keyDown(window, { key: 'Shift', ctrlKey: true, metaKey: true, shiftKey: true })
+    fireEvent.keyUp(window, { key: 'Meta', ctrlKey: true, shiftKey: true })
+    expect(screen.queryByRole('button', { name: 'Command+Ctrl' })).not.toBeInTheDocument()
+    expect(onChange).not.toHaveBeenCalled()
   })
 })

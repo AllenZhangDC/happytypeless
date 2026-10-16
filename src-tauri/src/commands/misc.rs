@@ -611,7 +611,7 @@ fn accessibility_diagnostic_row(
         diagnostic_row(
             "accessibility",
             DiagnosticStatus::Error,
-            "Accessibility permission is required for the Fn shortcut or keyboard output",
+            "Accessibility permission is required for native shortcuts or keyboard output",
             Some("openAccessibilitySettings"),
             checked_at,
         )
@@ -634,7 +634,11 @@ fn config_uses_macos_native_hotkey(config: &storage::AppConfig) -> bool {
     crate::hotkey::hotkey_registration_plan_from_config_for_platform(&hotkeys, "macos")
         .map(|plan| {
             plan.native.iter().any(|registered| {
-                registered.trigger == crate::native_hotkey::NativeHotkeyTrigger::Fn
+                matches!(
+                    registered.trigger,
+                    crate::native_hotkey::NativeHotkeyTrigger::Fn
+                        | crate::native_hotkey::NativeHotkeyTrigger::ControlCommand
+                )
             })
         })
         .unwrap_or(false)
@@ -1642,6 +1646,24 @@ mod tests {
             accessibility.action.as_deref(),
             Some("openAccessibilitySettings")
         );
+    }
+
+    #[test]
+    fn modifier_pair_requires_accessibility_even_with_clipboard_output() {
+        let mut config = storage::AppConfig {
+            output_mode: "clipboard".to_string(),
+            hotkey: "Ctrl+Command".to_string(),
+            ..storage::AppConfig::default()
+        };
+        config.hotkeys = storage::HotkeyConfig::from_legacy("Ctrl+Command", "Command+.", "hold");
+        let caps = platform::PlatformCapabilities {
+            os: "macos".to_string(),
+            session_type: "unknown".to_string(),
+            global_hotkey_reliable: true,
+            keyboard_output_reliable: true,
+            clipboard_auto_paste_reliable: true,
+        };
+        assert!(config_requires_accessibility_permission(&config, &caps));
     }
 
     #[test]

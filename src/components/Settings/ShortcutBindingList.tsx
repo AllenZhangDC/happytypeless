@@ -66,6 +66,7 @@ export function HotkeyRecorder({
   const autoConfirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoStarted = useRef(false)
   const recordingRef = useRef(false)
+  const modifierPairArmed = useRef(false)
 
   const clearTimer = useCallback(() => {
     if (!autoConfirmTimer.current) return
@@ -80,6 +81,7 @@ export function HotkeyRecorder({
       setRecording(false)
       setModifierHint(null)
       setPending(null)
+      modifierPairArmed.current = false
       const validationError = validateHotkey?.(hotkey)
       if (validationError) {
         setError(validationError)
@@ -98,6 +100,7 @@ export function HotkeyRecorder({
     recordingRef.current = false
     setRecording(false)
     setPending(null)
+    modifierPairArmed.current = false
     setModifierHint(null)
     setError(null)
     resumeHotkey().catch(() => {})
@@ -110,17 +113,19 @@ export function HotkeyRecorder({
     recordingRef.current = true
     setRecording(true)
     setPending(null)
+    modifierPairArmed.current = false
     setModifierHint(null)
     setError(null)
   }, [disabled])
 
   useEffect(() => {
     return () => {
+      clearTimer()
       if (!recordingRef.current) return
       recordingRef.current = false
       resumeHotkey().catch(() => {})
     }
-  }, [])
+  }, [clearTimer])
 
   useEffect(() => {
     if (!autoStart || autoStarted.current) return
@@ -132,6 +137,7 @@ export function HotkeyRecorder({
     (event: KeyboardEvent) => {
       event.preventDefault()
       event.stopPropagation()
+      if (event.repeat) return
 
       const parts: string[] = []
       if (isMac && event.metaKey) parts.push('Command')
@@ -141,10 +147,19 @@ export function HotkeyRecorder({
       if (!isMac && event.metaKey) parts.push('Meta')
 
       if (['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) {
+        if (isMac && event.ctrlKey && event.metaKey && !event.altKey && !event.shiftKey) {
+          modifierPairArmed.current = true
+          setPending('Command+Ctrl')
+        } else {
+          modifierPairArmed.current = false
+          clearTimer()
+          setPending(null)
+        }
         setModifierHint(parts.length > 0 ? `${parts.join('+')}+...` : null)
         return
       }
 
+      modifierPairArmed.current = false
       setModifierHint(null)
       const keyMap: Record<string, string> = {
         ' ': 'Space',
@@ -175,20 +190,27 @@ export function HotkeyRecorder({
       if (autoConfirmTimer.current) clearTimeout(autoConfirmTimer.current)
       autoConfirmTimer.current = setTimeout(() => confirmHotkey(combo), 1500)
     },
-    [confirmHotkey, isMac],
+    [clearTimer, confirmHotkey, isMac],
   )
 
   useEffect(() => {
     if (!recording) return
-    const clearModifierHint = () => setModifierHint(null)
+    const clearModifierHint = (event: KeyboardEvent) => {
+      setModifierHint(null)
+      if (!modifierPairArmed.current || !['Control', 'Meta'].includes(event.key)) return
+      modifierPairArmed.current = false
+      const combo = 'Command+Ctrl'
+      setPending(combo)
+      clearTimer()
+      autoConfirmTimer.current = setTimeout(() => confirmHotkey(combo), 1500)
+    }
     window.addEventListener('keydown', handleKeyDown, true)
     window.addEventListener('keyup', clearModifierHint, true)
     return () => {
       window.removeEventListener('keydown', handleKeyDown, true)
       window.removeEventListener('keyup', clearModifierHint, true)
-      clearTimer()
     }
-  }, [clearTimer, handleKeyDown, recording])
+  }, [clearTimer, confirmHotkey, handleKeyDown, recording])
 
   const handleClick = () => {
     if (disabled) return

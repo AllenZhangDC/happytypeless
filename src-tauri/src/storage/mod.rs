@@ -93,13 +93,20 @@ impl ShortcutBinding {
         }
 
         let mut parts = binding.modifiers;
-        parts.push(binding.primary);
+        if !binding.primary.is_empty() {
+            parts.push(binding.primary);
+        }
         Some(parts.join("+"))
     }
 
     pub fn normalize(&mut self) -> bool {
-        let Some(primary) = normalize_hotkey_primary(&self.primary) else {
-            return false;
+        let primary = if self.primary.trim().is_empty() {
+            String::new()
+        } else {
+            let Some(primary) = normalize_hotkey_primary(&self.primary) else {
+                return false;
+            };
+            primary
         };
 
         let mut seen_semantic = HashSet::new();
@@ -115,6 +122,15 @@ impl ShortcutBinding {
         }
 
         modifiers.sort_by_key(|modifier| hotkey_modifier_rank(modifier));
+        if primary.is_empty()
+            && (modifiers.len() != 2
+                || !modifiers.iter().any(|modifier| modifier == "Ctrl")
+                || !modifiers
+                    .iter()
+                    .any(|modifier| modifier == "Command" || modifier == "Super"))
+        {
+            return false;
+        }
         self.primary = primary;
         self.modifiers = modifiers;
         true
@@ -781,10 +797,20 @@ fn binding_from_hotkey_string(value: &str) -> Option<ShortcutBinding> {
         return None;
     }
 
-    let primary = normalize_hotkey_primary(parts.last()?)?;
+    let modifier_only = parts.len() == 2
+        && parts.iter().all(|part| {
+            normalize_hotkey_modifier(part)
+                .map(|(semantic, _)| semantic == "ctrl" || semantic == "super")
+                .unwrap_or(false)
+        });
+    let primary = if modifier_only {
+        String::new()
+    } else {
+        normalize_hotkey_primary(parts.last()?)?
+    };
     let mut modifiers = Vec::new();
     let mut seen_semantic = HashSet::new();
-    for part in &parts[..parts.len() - 1] {
+    for part in &parts[..parts.len() - usize::from(!modifier_only)] {
         let (semantic, canonical) = normalize_hotkey_modifier(part)?;
         if !seen_semantic.insert(semantic) {
             return None;
@@ -793,6 +819,9 @@ fn binding_from_hotkey_string(value: &str) -> Option<ShortcutBinding> {
     }
 
     modifiers.sort_by_key(|modifier| hotkey_modifier_rank(modifier));
+    if modifier_only && seen_semantic.len() != 2 {
+        return None;
+    }
     Some(ShortcutBinding { primary, modifiers })
 }
 
@@ -3074,6 +3103,19 @@ mod tests {
                 .and_then(ShortcutBinding::to_hotkey_string),
             Some("Fn+LeftShift".to_string())
         );
+    }
+
+    #[test]
+    fn modifier_only_control_command_round_trips_in_config() {
+        let binding = ShortcutBinding::from_hotkey("Control+Win").unwrap();
+        assert_eq!(binding.primary, "");
+        assert_eq!(binding.to_hotkey_string().as_deref(), Some("Super+Ctrl"));
+        let mut config = AppConfig::default();
+        config.hotkeys.dictation = binding.clone();
+        config.hotkeys.dictation_bindings = vec![binding];
+        let loaded = AppConfig::from_stored_value(serde_json::to_value(config).unwrap()).unwrap();
+        assert_eq!(loaded.hotkey, "Super+Ctrl");
+        assert_eq!(loaded.hotkeys.dictation.primary, "");
     }
 
     #[cfg(target_os = "windows")]

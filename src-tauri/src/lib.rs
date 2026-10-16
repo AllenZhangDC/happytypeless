@@ -950,6 +950,7 @@ pub fn run() {
             app.manage(shared_client);
             app.manage(context_detector);
             app.manage(pipeline_handle);
+            app.manage(hotkey::HoldRecordingIntent::default());
             app.manage(commands::ask::AskDictationState::default());
             app.manage(HotkeyModeCache(Arc::new(Mutex::new(
                 initial_config.hotkey_mode.clone(),

@@ -6,6 +6,7 @@ use crate::AskHotkeyCache;
 use crate::HotkeyModeCache;
 use crate::HotkeyRoleCache;
 use crate::SessionTokenStore;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::Emitter;
@@ -411,6 +412,7 @@ pub fn native_trigger_supported_on_platform(trigger: NativeHotkeyTrigger, platfo
             NativeHotkeyTrigger::Fn
                 | NativeHotkeyTrigger::FnSpace
                 | NativeHotkeyTrigger::FnLeftShift
+                | NativeHotkeyTrigger::ControlCommand
         ),
         "windows" => matches!(
             trigger,
@@ -425,6 +427,21 @@ pub fn native_trigger_supported_on_platform(trigger: NativeHotkeyTrigger, platfo
 pub fn native_trigger_from_binding(
     binding: &storage::ShortcutBinding,
 ) -> Option<NativeHotkeyTrigger> {
+    if binding.primary.trim().is_empty() && binding.modifiers.len() == 2 {
+        let has_control = binding
+            .modifiers
+            .iter()
+            .any(|value| matches!(value.trim().to_lowercase().as_str(), "ctrl" | "control"));
+        let has_command = binding.modifiers.iter().any(|value| {
+            matches!(
+                value.trim().to_lowercase().as_str(),
+                "command" | "cmd" | "super" | "meta" | "win"
+            )
+        });
+        if has_control && has_command {
+            return Some(NativeHotkeyTrigger::ControlCommand);
+        }
+    }
     if binding.modifiers.is_empty() {
         return match binding.primary.trim().to_lowercase().as_str() {
             "fn" | "function" => Some(NativeHotkeyTrigger::Fn),
@@ -723,6 +740,20 @@ enum RecordingShortcutAction {
     Ignore,
 }
 
+/// Tracks the physical hold independently of async pipeline startup.
+#[derive(Default)]
+pub struct HoldRecordingIntent(AtomicBool);
+
+impl HoldRecordingIntent {
+    fn set_pressed(&self, pressed: bool) {
+        self.0.store(pressed, Ordering::SeqCst);
+    }
+
+    fn is_pressed(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 fn ask_shortcut_action(
     event_state: ShortcutState,
     is_recording: bool,
@@ -852,9 +883,16 @@ fn handle_ask_shortcut(handle: tauri::AppHandle, action: AskShortcutAction) {
     }
 }
 
-fn handle_recording_shortcut(handle: tauri::AppHandle, action: RecordingShortcutAction) {
+fn handle_recording_shortcut(
+    handle: tauri::AppHandle,
+    action: RecordingShortcutAction,
+    hold_mode: bool,
+) {
     match action {
         RecordingShortcutAction::Start { options } => {
+            if hold_mode {
+                handle.state::<HoldRecordingIntent>().set_pressed(true);
+            }
             tauri::async_runtime::spawn(async move {
                 if handle.state::<commands::ask::AskDictationState>().is_busy() {
                     return;
@@ -864,10 +902,18 @@ fn handle_recording_shortcut(handle: tauri::AppHandle, action: RecordingShortcut
                 if let Err(e) = pipeline.start_with_options(options).await {
                     tracing::error!("Failed to start recording: {}", e);
                     let _ = handle.emit("pipeline:error", e.to_string());
+                } else if hold_mode && !handle.state::<HoldRecordingIntent>().is_pressed() {
+                    if let Err(e) = pipeline.stop().await {
+                        tracing::error!("Failed to stop released hold recording: {}", e);
+                        let _ = handle.emit("pipeline:error", e.to_string());
+                    }
                 }
             });
         }
         RecordingShortcutAction::Stop => {
+            if hold_mode {
+                handle.state::<HoldRecordingIntent>().set_pressed(false);
+            }
             tauri::async_runtime::spawn(async move {
                 if handle.state::<commands::ask::AskDictationState>().is_busy() {
                     return;
@@ -927,7 +973,7 @@ pub fn handle_hotkey_role_event(
                     force_translate: true,
                 },
             );
-            handle_recording_shortcut(handle, action);
+            handle_recording_shortcut(handle, action, hotkey_mode != "toggle");
         }
         HotkeyRole::Dictation => {
             let ask_action = {
@@ -963,7 +1009,7 @@ pub fn handle_hotkey_role_event(
                 pipeline_state,
                 pipeline::PipelineStartOptions::default(),
             );
-            handle_recording_shortcut(handle, action);
+            handle_recording_shortcut(handle, action, hotkey_mode != "toggle");
         }
         role => handle_advanced_role_shortcut(handle, role, event_state),
     }
@@ -1279,6 +1325,31 @@ mod tests {
     }
 
     #[test]
+    fn control_command_modifier_pair_uses_macos_native_adapter_and_detects_conflicts() {
+        let binding = storage::ShortcutBinding::from_hotkey("Ctrl+Command").unwrap();
+        let mut config = storage::HotkeyConfig::from_legacy("Fn", "Fn+Space", "hold");
+        config.dictation = binding.clone();
+        config.dictation_bindings = vec![binding.clone()];
+        let plan = hotkey_registration_plan_from_config_for_platform(&config, "macos").unwrap();
+        assert!(plan.native.iter().any(|entry| {
+            entry.role == HotkeyRole::Dictation
+                && entry.trigger == NativeHotkeyTrigger::ControlCommand
+        }));
+        assert!(plan
+            .global
+            .iter()
+            .all(|entry| entry.role != HotkeyRole::Dictation));
+
+        config.ask = storage::ShortcutBinding::from_hotkey("Command+Control");
+        config.ask_bindings = config.ask.clone().into_iter().collect();
+        assert_eq!(
+            hotkey_registration_plan_from_config_for_platform(&config, "macos").unwrap_err(),
+            HotkeyPairError::ConflictingHotkeys
+        );
+        assert!(hotkey_registration_plan_from_config_for_platform(&config, "windows").is_err());
+    }
+
+    #[test]
     fn fn_dictation_conflicts_with_fn_ask_binding() {
         let dictation = storage::ShortcutBinding {
             primary: "Fn".to_string(),
@@ -1550,6 +1621,15 @@ mod tests {
             ),
             RecordingShortcutAction::Stop
         );
+    }
+
+    #[test]
+    fn hold_intent_remembers_release_before_async_start_finishes() {
+        let intent = HoldRecordingIntent::default();
+        intent.set_pressed(true);
+        assert!(intent.is_pressed());
+        intent.set_pressed(false);
+        assert!(!intent.is_pressed());
     }
 
     #[test]

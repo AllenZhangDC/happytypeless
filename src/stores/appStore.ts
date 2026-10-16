@@ -472,12 +472,15 @@ export function bindingFromHotkey(value: string): ShortcutBinding | null {
     .filter(Boolean)
   if (parts.length === 0) return null
 
-  const primary = normalizePrimary(parts[parts.length - 1])
-  if (!primary) return null
+  const modifierOnly =
+    parts.length === 2 &&
+    parts.every((part) => ['Ctrl', 'Command', 'Super'].includes(normalizeModifier(part) ?? ''))
+  const primary = modifierOnly ? '' : normalizePrimary(parts[parts.length - 1])
+  if (primary === null) return null
 
   const modifiers: string[] = []
   const seen = new Set<string>()
-  for (const part of parts.slice(0, -1)) {
+  for (const part of modifierOnly ? parts : parts.slice(0, -1)) {
     const modifier = normalizeModifier(part)
     if (!modifier) return null
     const semantic = modifier === 'Option' || modifier === 'Alt' ? 'Alt' : modifier
@@ -487,11 +490,19 @@ export function bindingFromHotkey(value: string): ShortcutBinding | null {
   }
 
   modifiers.sort((a, b) => modifierOrder.indexOf(a) - modifierOrder.indexOf(b))
+  if (
+    modifierOnly &&
+    !(
+      modifiers.includes('Ctrl') &&
+      modifiers.some((value) => value === 'Command' || value === 'Super')
+    )
+  )
+    return null
   return { primary, modifiers }
 }
 
 export function hotkeyFromBinding(binding: ShortcutBinding): string {
-  return [...binding.modifiers, binding.primary].join('+')
+  return [...binding.modifiers, ...(binding.primary ? [binding.primary] : [])].join('+')
 }
 
 const MAX_HOTKEY_BINDINGS_PER_ROLE = 3

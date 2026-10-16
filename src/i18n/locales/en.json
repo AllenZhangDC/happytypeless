@@ -413,7 +413,7 @@
     "hideCapsuleWhenIdle": "Hide capsule when idle",
     "accessibilityPermission": "macOS Accessibility",
     "accessibilityGranted": "Permission granted",
-    "accessibilityRequired": "Required for Fn shortcut or keyboard output",
+    "accessibilityRequired": "Required for native shortcuts or keyboard output",
     "grantPermission": "Grant Permission",
     "unsavedChanges": "You have unsaved changes",
     "llmModelPlaceholder": "e.g. gpt-4o-mini",

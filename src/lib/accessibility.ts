@@ -4,7 +4,7 @@ export function isMacPlatform() {
   return typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
 }
 
-function isFnDictationHotkey(config: AppConfig) {
+function usesNativeDictationHotkey(config: AppConfig) {
   const legacyHotkey = config.hotkey?.trim().toLowerCase()
   const dictationBindings = config.hotkeys?.dictationBindings?.length
     ? config.hotkeys.dictationBindings
@@ -14,12 +14,17 @@ function isFnDictationHotkey(config: AppConfig) {
   return (
     legacyHotkey === 'fn' ||
     dictationBindings.some(
-      (binding) => binding.primary?.trim().toLowerCase() === 'fn' && binding.modifiers.length === 0,
+      (binding) =>
+        (binding.primary?.trim().toLowerCase() === 'fn' && binding.modifiers.length === 0) ||
+        (binding.primary === '' &&
+          binding.modifiers.length === 2 &&
+          binding.modifiers.some((value) => value.toLowerCase() === 'ctrl') &&
+          binding.modifiers.some((value) => ['command', 'super'].includes(value.toLowerCase()))),
     )
   )
 }
 
 export function needsMacAccessibility(config: AppConfig) {
   const usesAutomatedInput = config.insertion_strategy !== 'clipboardCopyOnly'
-  return isMacPlatform() && (usesAutomatedInput || isFnDictationHotkey(config))
+  return isMacPlatform() && (usesAutomatedInput || usesNativeDictationHotkey(config))
 }

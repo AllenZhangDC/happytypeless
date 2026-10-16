@@ -413,7 +413,7 @@
     "hideCapsuleWhenIdle": "空闲时隐藏胶囊",
     "accessibilityPermission": "macOS 辅助功能",
     "accessibilityGranted": "权限已授予",
-    "accessibilityRequired": "Fn 快捷键或键盘输出需要此权限",
+    "accessibilityRequired": "原生快捷键或键盘输出需要此权限",
     "grantPermission": "授权",
     "unsavedChanges": "你有未保存的更改",
     "llmModelPlaceholder": "例如 gpt-4o-mini",
